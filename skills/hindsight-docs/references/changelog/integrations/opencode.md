@@ -10,6 +10,12 @@ For the source code, see [`hindsight-integrations/opencode`](https://github.com/
 
 ← [Back to main changelog](../index.md)
 
+## [0.2.2](https://github.com/vectorize-io/hindsight/tree/integrations/opencode/v0.2.2)
+
+**Bug Fixes**
+
+- Fixed the OpenCode integration plugin export to avoid exposing a non-function entry point.<span style={{color: "var(--ifm-color-emphasis-500)", margin: "0 0.3em"}}>·</span><a href="https://github.com/r266-tech" target="_blank" rel="noopener noreferrer" style={{color: "var(--ifm-color-primary)", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: "4px", verticalAlign: "middle"}}>@r266-tech</a><span style={{color: "var(--ifm-color-emphasis-500)", margin: "0 0.3em"}}>·</span><a href="https://github.com/vectorize-io/hindsight/commit/e68d32583" target="_blank" rel="noopener noreferrer" style={{fontFamily: "var(--ifm-font-family-monospace, monospace)", fontSize: "0.85em", color: "var(--ifm-color-emphasis-600)"}}>e68d32583</a>
+
 ## [0.2.1](https://github.com/vectorize-io/hindsight/tree/integrations/opencode/v0.2.1)
 
 **Bug Fixes**
