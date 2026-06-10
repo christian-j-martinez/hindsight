@@ -155,7 +155,8 @@
     "llmRequestsNotEnabled": "Requêtes LLM non activées",
     "llmRequestsDisabledMessage": "Le traçage des requêtes LLM est désactivé sur ce serveur. Définissez <envVar></envVar> pour l'activer.",
     "deleteWillDeleteDetails": "Cela supprimera {memories, plural, one {# mémoire} other {# mémoires}}, {documents, plural, one {# document} other {# documents}} et {links, plural, one {# lien} other {# liens}}.",
-    "deleteWillDeleteObservations": "Cela supprimera {count, plural, one {# observation} other {# observations}}."
+    "deleteWillDeleteObservations": "Cela supprimera {count, plural, one {# observation} other {# observations}}.",
+    "memoryDefense": "Défense de la mémoire"
   },
   "bankProfile": {
     "noBankSelected": "Aucune banque sélectionnée",
@@ -411,7 +412,17 @@
     "extractorHintWhichPlaceholder": "indice d'extracteur : quand choisir cette valeur",
     "addField": "champ",
     "addValueShort": "valeur",
-    "noValuesYet": "Aucune valeur pour l'instant."
+    "noValuesYet": "Aucune valeur pour l'instant.",
+    "memoryDefenseTitle": "Défense de la mémoire",
+    "memoryDefenseDescription": "Inspectez le contenu lors de la rétention et décidez quoi faire des secrets et autres préoccupations de sécurité avant qu'ils n'atteignent la mémoire.",
+    "memoryDefenseFailedToSave": "Échec de l'enregistrement des paramètres de Défense de la mémoire",
+    "memoryDefenseSavedToast": "Défense de la mémoire enregistrée",
+    "memoryDefenseActionLabel": "Action",
+    "memoryDefenseAction_allow": "Autoriser",
+    "memoryDefenseAction_redact": "Censurer",
+    "memoryDefenseAction_block": "Bloquer",
+    "memoryDefenseSecretLeakTitle": "Prévention des fuites de secrets",
+    "memoryDefenseSecretLeakDescription": "Analyse le contenu retenu à la recherche de secrets. 44 motifs couvrant les clés de fournisseurs courants, AWS et les informations personnelles."
   },
   "bankOperations": {
     "title": "Opérations en arrière-plan",
@@ -1016,6 +1027,7 @@
     "actionDeleteDirective": "Supprimer une directive",
     "actionFileConvertRetain": "Convertir le fichier",
     "actionWebhookDelivery": "Livraison webhook",
+    "actionMemoryDefense": "Défense de la mémoire",
     "transportAll": "Tous les transports",
     "transportHttp": "HTTP",
     "transportMcp": "MCP",

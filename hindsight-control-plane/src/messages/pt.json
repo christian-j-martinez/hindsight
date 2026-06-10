@@ -155,7 +155,8 @@
     "llmRequestsNotEnabled": "Requisições LLM não habilitadas",
     "llmRequestsDisabledMessage": "O rastreamento de requisições LLM está desabilitado neste servidor. Defina <envVar></envVar> para habilitar.",
     "deleteWillDeleteDetails": "Isso excluirá {memories, plural, one {# memória} other {# memórias}}, {documents, plural, one {# documento} other {# documentos}} e {links, plural, one {# link} other {# links}}.",
-    "deleteWillDeleteObservations": "Isso excluirá {count, plural, one {# observação} other {# observações}}."
+    "deleteWillDeleteObservations": "Isso excluirá {count, plural, one {# observação} other {# observações}}.",
+    "memoryDefense": "Defesa da memória"
   },
   "bankProfile": {
     "noBankSelected": "Nenhum Banco Selecionado",
@@ -411,7 +412,17 @@
     "extractorHintWhichPlaceholder": "dica do extrator: quando escolher este valor",
     "addField": "campo",
     "addValueShort": "valor",
-    "noValuesYet": "Ainda sem valores."
+    "noValuesYet": "Ainda sem valores.",
+    "memoryDefenseTitle": "Defesa da memória",
+    "memoryDefenseDescription": "Inspecione o conteúdo durante a retenção e decida o que fazer com segredos e outras preocupações de segurança antes que cheguem à memória.",
+    "memoryDefenseFailedToSave": "Falha ao salvar as configurações de Defesa da memória",
+    "memoryDefenseSavedToast": "Defesa da memória salva",
+    "memoryDefenseActionLabel": "Ação",
+    "memoryDefenseAction_allow": "Permitir",
+    "memoryDefenseAction_redact": "Redigir",
+    "memoryDefenseAction_block": "Bloquear",
+    "memoryDefenseSecretLeakTitle": "Prevenção de vazamento de segredos",
+    "memoryDefenseSecretLeakDescription": "Verifica o conteúdo retido em busca de segredos. 44 padrões cobrindo chaves comuns de provedores, AWS e informações pessoais."
   },
   "bankOperations": {
     "title": "Operações em Segundo Plano",
@@ -1016,6 +1027,7 @@
     "actionDeleteDirective": "Excluir Diretiva",
     "actionFileConvertRetain": "Converter arquivo",
     "actionWebhookDelivery": "Entrega de Webhook",
+    "actionMemoryDefense": "Defesa da memória",
     "transportAll": "Todos os transportes",
     "transportHttp": "HTTP",
     "transportMcp": "MCP",

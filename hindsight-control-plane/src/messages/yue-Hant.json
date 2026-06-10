@@ -155,7 +155,8 @@
     "llmRequestsNotEnabled": "LLM 請求未啟用",
     "llmRequestsDisabledMessage": "此伺服器上的 LLM 請求追蹤已停用。請設定 <envVar></envVar> 以啟用。",
     "deleteWillDeleteDetails": "將刪除 {memories, plural, other {# 條記憶}}、{documents, plural, other {# 個文件}} 和 {links, plural, other {# 個連結}}。",
-    "deleteWillDeleteObservations": "將刪除 {count, plural, other {# 個觀察}}。"
+    "deleteWillDeleteObservations": "將刪除 {count, plural, other {# 個觀察}}。",
+    "memoryDefense": "記憶防護"
   },
   "bankProfile": {
     "noBankSelected": "未選擇記憶庫",
@@ -411,7 +412,17 @@
     "extractorHintWhichPlaceholder": "擷取器提示：何時選用此值",
     "addField": "欄位",
     "addValueShort": "值",
-    "noValuesYet": "尚未有值。"
+    "noValuesYet": "尚未有值。",
+    "memoryDefenseTitle": "記憶防護",
+    "memoryDefenseDescription": "保留時檢查內容,喺密鑰同其他保安問題入到記憶前決定點處理。",
+    "memoryDefenseFailedToSave": "儲存記憶防護設定失敗",
+    "memoryDefenseSavedToast": "記憶防護已儲存",
+    "memoryDefenseActionLabel": "動作",
+    "memoryDefenseAction_allow": "容許",
+    "memoryDefenseAction_redact": "遮蔽",
+    "memoryDefenseAction_block": "封鎖",
+    "memoryDefenseSecretLeakTitle": "密鑰外洩防護",
+    "memoryDefenseSecretLeakDescription": "掃描保留內容嘅密鑰。44 種樣式涵蓋常見供應商金鑰、AWS 同個人資料。"
   },
   "bankOperations": {
     "title": "背景作業",
@@ -1016,6 +1027,7 @@
     "actionDeleteDirective": "刪除指令",
     "actionFileConvertRetain": "轉換檔案",
     "actionWebhookDelivery": "Webhook 投遞",
+    "actionMemoryDefense": "記憶防護",
     "transportAll": "所有傳輸",
     "transportHttp": "HTTP",
     "transportMcp": "MCP",

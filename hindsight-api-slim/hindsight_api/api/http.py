@@ -5718,6 +5718,15 @@ def _register_routes(app: FastAPI):
                     app.state.memory._operation_validator.validate_bank_write(ctx)
                 )
 
+            # Validate Memory Defense policy shape before persisting.
+            if "memory_defense" in request.updates and request.updates["memory_defense"] is not None:
+                from hindsight_api.extensions.memory_defense import parse_policy
+
+                try:
+                    parse_policy(request.updates["memory_defense"])
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=f"invalid memory_defense policy: {exc}")
+
             # Update config via config resolver (validates configurable fields and permissions)
             await app.state.memory._config_resolver.update_bank_config(bank_id, request.updates, request_context)
 
@@ -6252,6 +6261,15 @@ def _register_routes(app: FastAPI):
             # client errors, not server faults.
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
+            from dataclasses import asdict
+
+            from hindsight_api.engine.retain.orchestrator import MemoryDefenseAllBlockedError
+
+            if isinstance(e, MemoryDefenseAllBlockedError):
+                raise HTTPException(
+                    status_code=422,
+                    detail={"violations": [asdict(v) for v in e.violations]},
+                )
             import traceback
 
             # Create a summary of the input for debugging

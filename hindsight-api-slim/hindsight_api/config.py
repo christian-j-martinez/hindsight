@@ -1481,6 +1481,10 @@ class HindsightConfig:
     # When False: only label entities are extracted (or no entities at all if no labels configured)
     entities_allow_free_form: bool
 
+    # Memory Defense policy (dict matching DefensePolicy schema — validated on write)
+    # None = Memory Defense disabled / not configured for this bank
+    memory_defense: dict | None
+
     # Reflect agent settings
     reflect_mission: str | None
     reflect_source_facts_max_tokens: int
@@ -1675,6 +1679,8 @@ class HindsightConfig:
         "disposition_empathy",
         # Gemini safety settings (controls content filtering for Gemini/VertexAI providers)
         "llm_gemini_safety_settings",
+        # Memory Defense policy (validated against DefensePolicy schema on write)
+        "memory_defense",
     }
 
     @property
@@ -2412,6 +2418,7 @@ class HindsightConfig:
             ),
             entity_labels=None,
             entities_allow_free_form=True,
+            memory_defense=None,
             # Database migrations
             run_migrations_on_startup=os.getenv(ENV_RUN_MIGRATIONS_ON_STARTUP, "true").lower() == "true",
             # Database connection pool

@@ -155,7 +155,8 @@
     "llmRequestsNotEnabled": "LLMリクエストは有効になっていません",
     "llmRequestsDisabledMessage": "このサーバーではLLMリクエストのトレースが無効になっています。有効にするには <envVar></envVar> を設定してください。",
     "deleteWillDeleteDetails": "{memories, plural, other {# 件のメモリ}}、{documents, plural, other {# 件のドキュメント}}、および {links, plural, other {# 件のリンク}} が削除されます。",
-    "deleteWillDeleteObservations": "{count, plural, other {# 件の観測}} が削除されます。"
+    "deleteWillDeleteObservations": "{count, plural, other {# 件の観測}} が削除されます。",
+    "memoryDefense": "メモリ防御"
   },
   "bankProfile": {
     "noBankSelected": "バンクが選択されていません",
@@ -411,7 +412,17 @@
     "extractorHintWhichPlaceholder": "抽出ヒント: いつこの値を選ぶか",
     "addField": "フィールド",
     "addValueShort": "値",
-    "noValuesYet": "まだ値がありません。"
+    "noValuesYet": "まだ値がありません。",
+    "memoryDefenseTitle": "メモリ防御",
+    "memoryDefenseDescription": "保持時にコンテンツを検査し、シークレットやその他のセキュリティ上の懸念事項がメモリに到達する前にどう扱うかを決定します。",
+    "memoryDefenseFailedToSave": "メモリ防御の設定の保存に失敗しました",
+    "memoryDefenseSavedToast": "メモリ防御を保存しました",
+    "memoryDefenseActionLabel": "アクション",
+    "memoryDefenseAction_allow": "許可",
+    "memoryDefenseAction_redact": "マスク",
+    "memoryDefenseAction_block": "ブロック",
+    "memoryDefenseSecretLeakTitle": "シークレット漏洩防止",
+    "memoryDefenseSecretLeakDescription": "保持されたコンテンツのシークレットをスキャンします。一般的なプロバイダーキー、AWS、個人情報をカバーする44パターン。"
   },
   "bankOperations": {
     "title": "バックグラウンド操作",
@@ -1016,6 +1027,7 @@
     "actionDeleteDirective": "ディレクティブを削除",
     "actionFileConvertRetain": "ファイル変換",
     "actionWebhookDelivery": "Webhook配信",
+    "actionMemoryDefense": "メモリ防御",
     "transportAll": "すべてのトランスポート",
     "transportHttp": "HTTP",
     "transportMcp": "MCP",

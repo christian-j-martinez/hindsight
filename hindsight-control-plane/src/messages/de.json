@@ -155,7 +155,8 @@
     "llmRequestsNotEnabled": "LLM Requests nicht aktiviert",
     "llmRequestsDisabledMessage": "Das Tracing von LLM-Anfragen ist auf diesem Server deaktiviert. Setzen Sie <envVar></envVar>, um es zu aktivieren.",
     "deleteWillDeleteDetails": "Dadurch werden {memories, plural, one {# Erinnerung} other {# Erinnerungen}}, {documents, plural, one {# Dokument} other {# Dokumente}} und {links, plural, one {# Verknüpfung} other {# Verknüpfungen}} gelöscht.",
-    "deleteWillDeleteObservations": "Dadurch werden {count, plural, one {# Beobachtung} other {# Beobachtungen}} gelöscht."
+    "deleteWillDeleteObservations": "Dadurch werden {count, plural, one {# Beobachtung} other {# Beobachtungen}} gelöscht.",
+    "memoryDefense": "Speicherschutz"
   },
   "bankProfile": {
     "noBankSelected": "Keine Bank ausgewählt",
@@ -411,7 +412,17 @@
     "extractorHintWhichPlaceholder": "Extraktor-Hinweis: wann diesen Wert wählen",
     "addField": "Feld",
     "addValueShort": "Wert",
-    "noValuesYet": "Noch keine Werte."
+    "noValuesYet": "Noch keine Werte.",
+    "memoryDefenseTitle": "Speicherschutz",
+    "memoryDefenseDescription": "Inhalte beim Speichern prüfen und entscheiden, was mit Geheimnissen und anderen Sicherheitsbedenken geschehen soll, bevor sie in den Speicher gelangen.",
+    "memoryDefenseFailedToSave": "Speicherschutz-Einstellungen konnten nicht gespeichert werden",
+    "memoryDefenseSavedToast": "Speicherschutz gespeichert",
+    "memoryDefenseActionLabel": "Aktion",
+    "memoryDefenseAction_allow": "Zulassen",
+    "memoryDefenseAction_redact": "Schwärzen",
+    "memoryDefenseAction_block": "Blockieren",
+    "memoryDefenseSecretLeakTitle": "Geheimnislecks verhindern",
+    "memoryDefenseSecretLeakDescription": "Gespeicherte Inhalte auf Geheimnisse prüfen. 44 Muster für gängige Anbieter-Schlüssel, AWS und persönliche Daten."
   },
   "bankOperations": {
     "title": "Hintergrundoperationen",
@@ -1016,6 +1027,7 @@
     "actionDeleteDirective": "Direktive löschen",
     "actionFileConvertRetain": "Datei konvertieren",
     "actionWebhookDelivery": "Webhook-Zustellung",
+    "actionMemoryDefense": "Speicherschutz",
     "transportAll": "Alle Transportmittel",
     "transportHttp": "HTTP",
     "transportMcp": "MCP",
