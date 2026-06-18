@@ -562,6 +562,8 @@ ENV_RECALL_BUDGET_ADAPTIVE_MID = "HINDSIGHT_API_RECALL_BUDGET_ADAPTIVE_MID"
 ENV_RECALL_BUDGET_ADAPTIVE_HIGH = "HINDSIGHT_API_RECALL_BUDGET_ADAPTIVE_HIGH"
 ENV_RECALL_BUDGET_MIN = "HINDSIGHT_API_RECALL_BUDGET_MIN"
 ENV_RECALL_BUDGET_MAX = "HINDSIGHT_API_RECALL_BUDGET_MAX"
+# FORK: minimum post-rerank relevance score a fact must meet to be returned.
+ENV_RECALL_MIN_SCORE = "HINDSIGHT_API_RECALL_MIN_SCORE"
 
 # Recall candidate gating (per-source cap + BM25 score floor)
 ENV_BM25_MIN_SCORE = "HINDSIGHT_API_BM25_MIN_SCORE"
@@ -981,6 +983,14 @@ DEFAULT_RECALL_BUDGET_ADAPTIVE_MID = 0.075
 DEFAULT_RECALL_BUDGET_ADAPTIVE_HIGH = 0.25
 DEFAULT_RECALL_BUDGET_MIN = 20  # Floor for the adaptive function
 DEFAULT_RECALL_BUDGET_MAX = 2000  # Ceiling for the adaptive function
+
+# FORK: Minimum post-rerank relevance score (typically 0.0-1.0) a fact must meet
+# to be included in recall results. 0.0 = disabled (upstream behavior: always
+# return the top matches up to the token budget). Higher = stricter; when nothing
+# clears the bar, recall returns ZERO results instead of forcing irrelevant ones.
+# Only applied to cross-encoder reranking (scores from passthrough rerankers are
+# not calibrated relevance values). Tune live via the bank's recall_min_score.
+DEFAULT_RECALL_MIN_SCORE = 0.0
 
 # Disposition defaults (None = not set, fall back to bank DB value or 3)
 DEFAULT_DISPOSITION_SKEPTICISM = None
@@ -1626,6 +1636,8 @@ class HindsightConfig:
     recall_budget_adaptive_high: float
     recall_budget_min: int
     recall_budget_max: int
+    # FORK: minimum relevance score [~0.0-1.0]; results scoring below are dropped (0.0 = disabled)
+    recall_min_score: float
 
     # Disposition settings (hierarchical - can be overridden per bank; None = fall back to DB)
     disposition_skepticism: int | None
@@ -1804,6 +1816,7 @@ class HindsightConfig:
         "recall_budget_adaptive_high",
         "recall_budget_min",
         "recall_budget_max",
+        "recall_min_score",  # FORK: relevance threshold (live-tunable per bank)
         # Disposition settings
         "disposition_skepticism",
         "disposition_literalism",
@@ -2654,6 +2667,7 @@ class HindsightConfig:
             ),
             recall_budget_min=int(os.getenv(ENV_RECALL_BUDGET_MIN, str(DEFAULT_RECALL_BUDGET_MIN))),
             recall_budget_max=int(os.getenv(ENV_RECALL_BUDGET_MAX, str(DEFAULT_RECALL_BUDGET_MAX))),
+            recall_min_score=float(os.getenv(ENV_RECALL_MIN_SCORE, str(DEFAULT_RECALL_MIN_SCORE))),  # FORK
             # Disposition settings (None = fall back to DB value)
             disposition_skepticism=int(os.getenv(ENV_DISPOSITION_SKEPTICISM))
             if os.getenv(ENV_DISPOSITION_SKEPTICISM)

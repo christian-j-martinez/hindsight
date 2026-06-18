@@ -298,6 +298,14 @@ class RecallRequest(BaseModel):
         description="Compound tag filter using boolean groups. Groups in the list are AND-ed. "
         "Each group is a leaf {tags, match} or compound {and: [...]}, {or: [...]}, {not: ...}.",
     )
+    min_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="FORK: minimum relevance score (0.0-1.0). Results scoring below this are "
+        "excluded, so recall can return zero results when nothing is relevant. Overrides the "
+        "bank's recall_min_score for this call. Only applies to cross-encoder reranking.",
+    )
 
     @field_validator("query")
     @classmethod
@@ -3838,6 +3846,7 @@ def _register_routes(app: FastAPI):
                         tags=request.tags,
                         tags_match=request.tags_match,
                         tag_groups=request.tag_groups,
+                        min_score=request.min_score,  # FORK
                     ),
                     operation="recall",
                     bank_id=bank_id,

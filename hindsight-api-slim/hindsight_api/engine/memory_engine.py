@@ -3860,6 +3860,7 @@ class MemoryEngine(MemoryEngineInterface):
         _connection_budget: int | None = None,
         _quiet: bool = False,
         reranking: RecallReranking = "cross_encoder",
+        min_score: float | None = None,  # FORK: per-call relevance floor; None = use bank config
     ) -> RecallResultModel:
         """
         Recall memories using N*4-way parallel retrieval (N fact types × 4 retrieval methods).
@@ -4639,6 +4640,24 @@ class MemoryEngine(MemoryEngineInterface):
                 log_buffer.append("  [4.6] Combined scoring: ce * recency_boost(0.2) * temporal_boost(0.2)")
                 if strategy_boosts:
                     log_buffer.append(f"  [4.7] Strategy boosts applied: {strategy_boosts}")
+
+                # FORK: Minimum relevance threshold. Drop results whose final combined
+                # weight is below the floor so recall returns NOTHING when nothing is
+                # genuinely relevant, instead of always filling the token budget with the
+                # closest-but-irrelevant matches. Per-call `min_score` overrides the bank's
+                # `recall_min_score`. Skipped for passthrough rerankers, whose weights are
+                # not calibrated relevance values.
+                if not is_passthrough:
+                    score_floor = (
+                        min_score if min_score is not None else float(budget_config_dict.get("recall_min_score", 0.0))
+                    )
+                    if score_floor > 0.0:
+                        before_floor = len(scored_results)
+                        scored_results = [sr for sr in scored_results if sr.weight >= score_floor]
+                        log_buffer.append(
+                            f"  [4.8] Min-score filter (>= {score_floor:.3f}): "
+                            f"{len(scored_results)}/{before_floor} kept"
+                        )
 
             # Add reranked results to tracer AFTER combined scoring (so normalized values are included)
             if tracer:
