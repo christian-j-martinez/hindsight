@@ -3969,6 +3969,11 @@ class MemoryEngine(MemoryEngineInterface):
         # derives from max_tokens and clamps to [recall_budget_min, recall_budget_max].
         budget_config_dict = await self._config_resolver.get_bank_config(bank_id, request_context)
         thinking_budget = _resolve_thinking_budget(budget_config_dict, budget, max_tokens)
+        # FORK: resolve the relevance floor here (where both the per-call override and the
+        # bank config are in scope), then pass the single resolved value into the search.
+        resolved_min_score = (
+            min_score if min_score is not None else float(budget_config_dict.get("recall_min_score", 0.0))
+        )
 
         # Log recall start with tags if present (skip if quiet mode for internal operations)
         if not _quiet:
@@ -4024,6 +4029,7 @@ class MemoryEngine(MemoryEngineInterface):
                             max_source_facts_tokens=max_source_facts_tokens,
                             max_source_facts_tokens_per_observation=max_source_facts_tokens_per_observation,
                             reranking=reranking,
+                            min_score=resolved_min_score,  # FORK
                         )
                         break  # Success - exit retry loop
                     except OperationCancelledError:
@@ -4160,6 +4166,7 @@ class MemoryEngine(MemoryEngineInterface):
         max_source_facts_tokens: int = 4096,
         max_source_facts_tokens_per_observation: int = -1,
         reranking: RecallReranking = "cross_encoder",
+        min_score: float = 0.0,  # FORK: resolved relevance floor (0.0 = disabled)
     ) -> RecallResultModel:
         """
         Search implementation with modular retrieval and reranking.
@@ -4647,17 +4654,12 @@ class MemoryEngine(MemoryEngineInterface):
                 # closest-but-irrelevant matches. Per-call `min_score` overrides the bank's
                 # `recall_min_score`. Skipped for passthrough rerankers, whose weights are
                 # not calibrated relevance values.
-                if not is_passthrough:
-                    score_floor = (
-                        min_score if min_score is not None else float(budget_config_dict.get("recall_min_score", 0.0))
+                if not is_passthrough and min_score > 0.0:
+                    before_floor = len(scored_results)
+                    scored_results = [sr for sr in scored_results if sr.weight >= min_score]
+                    log_buffer.append(
+                        f"  [4.8] Min-score filter (>= {min_score:.3f}): {len(scored_results)}/{before_floor} kept"
                     )
-                    if score_floor > 0.0:
-                        before_floor = len(scored_results)
-                        scored_results = [sr for sr in scored_results if sr.weight >= score_floor]
-                        log_buffer.append(
-                            f"  [4.8] Min-score filter (>= {score_floor:.3f}): "
-                            f"{len(scored_results)}/{before_floor} kept"
-                        )
 
             # Add reranked results to tracer AFTER combined scoring (so normalized values are included)
             if tracer:
