@@ -3061,7 +3061,13 @@ def create_app(
 
         # Start worker poller if the backend supports it.
         # All current backends (PostgreSQL, Oracle) support async worker/poller.
-        if config.worker_enabled and memory._backend.supports_worker_poller:
+        #
+        # Inline mode skips the poller entirely: tasks run synchronously inside
+        # the request (SyncTaskBackend), so there is nothing to poll for and the
+        # database is left untouched between requests.
+        if config.inline_tasks:
+            logging.info("Inline task mode enabled — worker poller not started (tasks run synchronously)")
+        elif config.worker_enabled and memory._backend.supports_worker_poller:
             from ..config import DEFAULT_DATABASE_SCHEMA
 
             worker_id = config.worker_id or socket.gethostname()

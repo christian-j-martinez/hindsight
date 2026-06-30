@@ -1553,6 +1553,7 @@ Configuration for background task processing. By default, the API processes task
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `HINDSIGHT_API_WORKER_ENABLED` | Enable internal worker in API process | `true` |
+| `HINDSIGHT_API_INLINE_TASKS` | Run background tasks synchronously inside the request instead of via a poller. No worker poller and no maintenance loop, so the database is touched only while a request is in flight — letting scale-to-zero databases (e.g. Neon) auto-suspend when idle. See note below. | `false` |
 | `HINDSIGHT_API_WORKER_ID` | Unique worker identifier | hostname |
 | `HINDSIGHT_API_WORKER_POLL_INTERVAL_MS` | Database polling interval in milliseconds | `500` |
 | `HINDSIGHT_API_WORKER_MAX_RETRIES` | Max retries before marking task failed | `3` |
@@ -1566,6 +1567,16 @@ Configuration for background task processing. By default, the API processes task
 | `HINDSIGHT_API_WORKER_REFRESH_MENTAL_MODEL_MAX_SLOTS` | Reserved slots for refresh_mental_model tasks within `WORKER_MAX_SLOTS` | `0` |
 | `HINDSIGHT_API_WORKER_GRAPH_MAINTENANCE_MAX_SLOTS` | Reserved slots for graph_maintenance tasks within `WORKER_MAX_SLOTS` | `0` |
 | `HINDSIGHT_API_WORKER_IMPORT_DOCUMENTS_MAX_SLOTS` | Reserved slots for import_documents tasks within `WORKER_MAX_SLOTS` | `0` |
+
+:::note Inline task mode (single process, zero idle polling)
+
+The internal worker polls the database continuously (every `WORKER_POLL_INTERVAL_MS`) looking for pending tasks. On a **scale-to-zero / usage-billed database** (e.g. Neon, Aurora Serverless) that constant polling keeps the compute awake 24/7 even when the deployment is idle, which can dominate the bill.
+
+Set `HINDSIGHT_API_INLINE_TASKS=true` for a single-process deployment that should touch the database **only while serving a request**. In this mode the API runs each background task synchronously inside the request that triggers it (retain extraction, consolidation, graph maintenance, etc.), starts **no** poller, and runs **no** background maintenance loop. Between requests the database receives zero queries and can auto-suspend.
+
+Trade-off: `retain`/upload calls become synchronous — they return once extraction (and any triggered consolidation) finishes, instead of returning immediately and completing in the background. Recall is unaffected. Do **not** combine inline mode with dedicated `hindsight-worker` processes; it is meant for the all-in-one single-container deployment. (`WORKER_ENABLED` is ignored when inline mode is on.)
+
+:::
 
 :::note Slot reservations and shared pool
 Per-operation `*_MAX_SLOTS` values are **reservations within** `WORKER_MAX_SLOTS`, not additive pools. The sum of all reservations must not exceed `WORKER_MAX_SLOTS` (startup raises `ValueError` otherwise). Remaining capacity (`WORKER_MAX_SLOTS - sum of reservations`) forms a **shared pool** usable by any operation type on a first-come basis; operation types whose reserved capacity is full can also overflow into the shared pool. Consolidation's bank-serialization constraint (no two consolidation tasks for the same bank concurrently) is preserved regardless of which pool claims the slot.

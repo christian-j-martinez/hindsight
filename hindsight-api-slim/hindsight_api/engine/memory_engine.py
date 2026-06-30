@@ -1064,11 +1064,22 @@ class MemoryEngine(MemoryEngineInterface):
         self._cross_encoder_reranker = CrossEncoderReranker(cross_encoder=cross_encoder)
 
         # Initialize task backend.
-        # All backends use BrokerTaskBackend + WorkerPoller for async background execution.
+        # Normally all backends use BrokerTaskBackend + WorkerPoller for async
+        # background execution. In inline mode there is no poller, so tasks run
+        # synchronously inside the request via SyncTaskBackend instead.
         # Create the backend object early so we can query its capabilities.
         self._backend = create_database_backend(self._database_backend_type)
         if task_backend:
             self._task_backend = task_backend
+        elif config.inline_tasks:
+            # Inline mode: execute tasks synchronously within the request. No
+            # poller and no broker rows left waiting on a worker, so the database
+            # is touched only while a request is in flight — letting scale-to-zero
+            # databases (e.g. Neon) auto-suspend when idle.
+            from .task_backend import SyncTaskBackend
+
+            self._task_backend = SyncTaskBackend()
+            logger.info("Inline task mode enabled: tasks run synchronously, no worker poller")
         else:
             self._task_backend = self._backend.create_task_backend(
                 pool_getter=lambda: self._backend,
@@ -2852,10 +2863,17 @@ class MemoryEngine(MemoryEngineInterface):
         # Start the background maintenance loop: cross-tenant retention sweeps
         # (audit_log, llm_requests) plus the consolidation reconcile that
         # re-schedules banks with eligible-but-unscheduled facts.
+        #
+        # Skipped in inline mode: the reconcile sweep enqueues consolidation as
+        # async_operations rows that only a poller drains, so without a worker it
+        # would orphan them. It is also a periodic database toucher, which would
+        # defeat the point of inline mode (keeping a scale-to-zero database idle).
+        # The loop object is still constructed so close()/stop() stays a no-op.
         from .maintenance import MaintenanceLoop
 
         self._maintenance_loop = MaintenanceLoop(self)
-        self._maintenance_loop.start()
+        if not get_config().inline_tasks:
+            self._maintenance_loop.start()
 
         self._initialized = True
         logger.info("Memory system initialized (pool and task backend started)")

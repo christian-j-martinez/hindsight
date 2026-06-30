@@ -18,6 +18,8 @@ The API service is stateless and can be horizontally scaled behind a load balanc
 
 By default, the API also processes background tasks (mental model consolidation) internally. For high-throughput deployments, you can disable this and run dedicated workers instead.
 
+For the opposite end — a single-container deployment on a scale-to-zero database (e.g. Neon) — set `HINDSIGHT_API_INLINE_TASKS=true`. The API then runs background tasks synchronously inside the request, with no poller and no maintenance loop, so the database is queried only while serving a request and can auto-suspend when idle. See [Configuration - Distributed Workers](./configuration#distributed-workers) for details and trade-offs.
+
 ## Worker Service
 
 Dedicated task processor for background operations. Uses the **same package and Docker image** as the API service, just with a different entry point.

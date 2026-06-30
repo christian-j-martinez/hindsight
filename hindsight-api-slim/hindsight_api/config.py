@@ -519,6 +519,10 @@ ENV_MODEL_INIT_TIMEOUT = "HINDSIGHT_API_MODEL_INIT_TIMEOUT"
 
 # Worker configuration (distributed task processing)
 ENV_WORKER_ENABLED = "HINDSIGHT_API_WORKER_ENABLED"
+# Inline task execution: run background tasks synchronously inside the request
+# instead of via a background worker/poller. Single-process, zero idle DB polling
+# (lets scale-to-zero databases like Neon auto-suspend when idle).
+ENV_INLINE_TASKS = "HINDSIGHT_API_INLINE_TASKS"
 ENV_WORKER_ID = "HINDSIGHT_API_WORKER_ID"
 ENV_WORKER_POLL_INTERVAL_MS = "HINDSIGHT_API_WORKER_POLL_INTERVAL_MS"
 ENV_WORKER_MAX_RETRIES = "HINDSIGHT_API_WORKER_MAX_RETRIES"
@@ -951,6 +955,10 @@ DEFAULT_MODEL_INIT_TIMEOUT = 300  # seconds (cap on startup model/connection ini
 
 # Worker configuration (distributed task processing)
 DEFAULT_WORKER_ENABLED = True  # API runs worker by default (standalone mode)
+# When True, the API executes background tasks synchronously within the request
+# (no poller, no maintenance loop). Off by default; opt-in for single-process
+# deployments that want the database touched only during requests.
+DEFAULT_INLINE_TASKS = False
 DEFAULT_WORKER_ID = None  # Will use hostname if not specified
 DEFAULT_WORKER_POLL_INTERVAL_MS = 500  # Poll database every 500ms
 DEFAULT_WORKER_MAX_RETRIES = 3  # Max retries before marking task failed
@@ -1662,6 +1670,9 @@ class HindsightConfig:
 
     # Worker configuration (distributed task processing)
     worker_enabled: bool
+    # Run background tasks inline within the request instead of via a poller.
+    # Implies no worker poller and no background maintenance loop.
+    inline_tasks: bool
     worker_id: str | None
     worker_poll_interval_ms: int
     worker_max_retries: int
@@ -2612,6 +2623,7 @@ class HindsightConfig:
             model_init_timeout=float(os.getenv(ENV_MODEL_INIT_TIMEOUT, str(DEFAULT_MODEL_INIT_TIMEOUT))),
             # Worker configuration
             worker_enabled=os.getenv(ENV_WORKER_ENABLED, str(DEFAULT_WORKER_ENABLED)).lower() == "true",
+            inline_tasks=os.getenv(ENV_INLINE_TASKS, str(DEFAULT_INLINE_TASKS)).lower() == "true",
             worker_id=os.getenv(ENV_WORKER_ID) or DEFAULT_WORKER_ID,
             worker_poll_interval_ms=int(os.getenv(ENV_WORKER_POLL_INTERVAL_MS, str(DEFAULT_WORKER_POLL_INTERVAL_MS))),
             worker_max_retries=int(os.getenv(ENV_WORKER_MAX_RETRIES, str(DEFAULT_WORKER_MAX_RETRIES))),
