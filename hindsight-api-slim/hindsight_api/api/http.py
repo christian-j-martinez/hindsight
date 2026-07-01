@@ -3059,15 +3059,24 @@ def create_app(
                 metrics_collector.set_db_pool(memory._pool)
                 logging.info("DB pool metrics configured")
 
-        # Start worker poller if the backend supports it.
+        # Start the embedded worker poller if the backend supports it.
         # All current backends (PostgreSQL, Oracle) support async worker/poller.
         #
-        # Inline mode skips the poller entirely: tasks run synchronously inside
-        # the request (SyncTaskBackend), so there is nothing to poll for and the
-        # database is left untouched between requests.
+        # Three modes:
+        #   * inline (config.inline_tasks): no poller at all — tasks run
+        #     synchronously inside the request via SyncTaskBackend.
+        #   * on-demand (config.worker_on_demand): the poller runs but wakes on
+        #     in-process task submission instead of polling, so retain stays async
+        #     while the database is left untouched between requests.
+        #   * default (config.worker_enabled): the poller polls continuously.
+        start_poller = (
+            not config.inline_tasks
+            and memory._backend.supports_worker_poller
+            and (config.worker_enabled or config.worker_on_demand)
+        )
         if config.inline_tasks:
             logging.info("Inline task mode enabled — worker poller not started (tasks run synchronously)")
-        elif config.worker_enabled and memory._backend.supports_worker_poller:
+        elif start_poller:
             from ..config import DEFAULT_DATABASE_SCHEMA
 
             worker_id = config.worker_id or socket.gethostname()
@@ -3083,9 +3092,16 @@ def create_app(
                 max_slots=config.worker_max_slots,
                 slot_reservations=config.worker_slot_reservations,
                 consolidation_bank_priority=config.worker_consolidation_bank_priority or None,
+                on_demand=config.worker_on_demand,
             )
+            if config.worker_on_demand:
+                # Wake this in-process poller on each task submission instead of
+                # having it poll the database to discover work.
+                memory._task_backend.set_wake_callback(poller.notify)
+                logging.info(f"Worker poller started in on-demand mode (worker_id={worker_id})")
+            else:
+                logging.info(f"Worker poller started (worker_id={worker_id})")
             poller_task = asyncio.create_task(poller.run())
-            logging.info(f"Worker poller started (worker_id={worker_id})")
         elif config.worker_enabled and not memory._backend.supports_worker_poller:
             logging.warning(
                 "Worker poller disabled — backend does not support async operations. "

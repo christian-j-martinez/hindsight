@@ -2864,15 +2864,15 @@ class MemoryEngine(MemoryEngineInterface):
         # (audit_log, llm_requests) plus the consolidation reconcile that
         # re-schedules banks with eligible-but-unscheduled facts.
         #
-        # Skipped in inline mode: the reconcile sweep enqueues consolidation as
-        # async_operations rows that only a poller drains, so without a worker it
-        # would orphan them. It is also a periodic database toucher, which would
-        # defeat the point of inline mode (keeping a scale-to-zero database idle).
-        # The loop object is still constructed so close()/stop() stays a no-op.
+        # Skipped in inline and on-demand modes: the reconcile sweep is a periodic
+        # database toucher, which would defeat the point of both modes (keeping a
+        # scale-to-zero database idle). The loop object is still constructed so
+        # close()/stop() stays a no-op.
         from .maintenance import MaintenanceLoop
 
+        cfg = get_config()
         self._maintenance_loop = MaintenanceLoop(self)
-        if not get_config().inline_tasks:
+        if not (cfg.inline_tasks or cfg.worker_on_demand):
             self._maintenance_loop.start()
 
         self._initialized = True

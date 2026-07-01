@@ -1553,7 +1553,8 @@ Configuration for background task processing. By default, the API processes task
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `HINDSIGHT_API_WORKER_ENABLED` | Enable internal worker in API process | `true` |
-| `HINDSIGHT_API_INLINE_TASKS` | Run background tasks synchronously inside the request instead of via a poller. No worker poller and no maintenance loop, so the database is touched only while a request is in flight — letting scale-to-zero databases (e.g. Neon) auto-suspend when idle. See note below. | `false` |
+| `HINDSIGHT_API_INLINE_TASKS` | Run background tasks **synchronously** inside the request instead of via a poller. No worker poller and no maintenance loop, so the database is touched only while a request is in flight. Retain blocks until extraction finishes. See note below. | `false` |
+| `HINDSIGHT_API_WORKER_ON_DEMAND` | Keep the **async** embedded worker but wake it via an in-process signal on each task submission instead of continuous polling. Retain returns immediately; between requests the database receives zero queries so it can auto-suspend. Single-process only. **Preferred over `INLINE_TASKS`** for always-on containers. See note below. | `false` |
 | `HINDSIGHT_API_WORKER_ID` | Unique worker identifier | hostname |
 | `HINDSIGHT_API_WORKER_POLL_INTERVAL_MS` | Database polling interval in milliseconds | `500` |
 | `HINDSIGHT_API_WORKER_MAX_RETRIES` | Max retries before marking task failed | `3` |
@@ -1568,13 +1569,16 @@ Configuration for background task processing. By default, the API processes task
 | `HINDSIGHT_API_WORKER_GRAPH_MAINTENANCE_MAX_SLOTS` | Reserved slots for graph_maintenance tasks within `WORKER_MAX_SLOTS` | `0` |
 | `HINDSIGHT_API_WORKER_IMPORT_DOCUMENTS_MAX_SLOTS` | Reserved slots for import_documents tasks within `WORKER_MAX_SLOTS` | `0` |
 
-:::note Inline task mode (single process, zero idle polling)
+:::note Single-process modes for scale-to-zero databases (no idle polling)
 
 The internal worker polls the database continuously (every `WORKER_POLL_INTERVAL_MS`) looking for pending tasks. On a **scale-to-zero / usage-billed database** (e.g. Neon, Aurora Serverless) that constant polling keeps the compute awake 24/7 even when the deployment is idle, which can dominate the bill.
 
-Set `HINDSIGHT_API_INLINE_TASKS=true` for a single-process deployment that should touch the database **only while serving a request**. In this mode the API runs each background task synchronously inside the request that triggers it (retain extraction, consolidation, graph maintenance, etc.), starts **no** poller, and runs **no** background maintenance loop. Between requests the database receives zero queries and can auto-suspend.
+Two modes make a single-container deployment touch the database **only while there is work**, so an idle database can auto-suspend. Both also skip the background maintenance loop (another periodic DB toucher). Pick one — do not set both, and do not combine either with dedicated `hindsight-worker` processes.
 
-Trade-off: `retain`/upload calls become synchronous — they return once extraction (and any triggered consolidation) finishes, instead of returning immediately and completing in the background. Recall is unaffected. Do **not** combine inline mode with dedicated `hindsight-worker` processes; it is meant for the all-in-one single-container deployment. (`WORKER_ENABLED` is ignored when inline mode is on.)
+- **`HINDSIGHT_API_WORKER_ON_DEMAND=true` (recommended for always-on containers).** Keeps the async worker embedded in the API, but because they share a process, a task submission wakes the worker with an **in-process signal** instead of the worker polling to discover it. `retain` returns immediately and extraction runs in the background; when idle the worker blocks on that signal and issues **zero** queries. Deferred/retried tasks re-arm the wake on a timer, and leftover work is drained on startup (surviving restarts/deploys).
+- **`HINDSIGHT_API_INLINE_TASKS=true` (for app-level serverless).** Runs each task **synchronously** inside the request, with no poller at all. Choose this only where a background task could not outlive the response (e.g. the process is frozen/killed right after replying). Trade-off: `retain`/upload blocks until extraction (and any triggered consolidation) finishes.
+
+Recall is unaffected by either mode. When on-demand or inline mode is active, `WORKER_ENABLED` is effectively ignored for the embedded worker's polling behavior.
 
 :::
 

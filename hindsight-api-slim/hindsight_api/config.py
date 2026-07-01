@@ -523,6 +523,11 @@ ENV_WORKER_ENABLED = "HINDSIGHT_API_WORKER_ENABLED"
 # instead of via a background worker/poller. Single-process, zero idle DB polling
 # (lets scale-to-zero databases like Neon auto-suspend when idle).
 ENV_INLINE_TASKS = "HINDSIGHT_API_INLINE_TASKS"
+# On-demand worker: keep the async background worker embedded in the API but wake
+# it via an in-process signal on each task submission instead of continuous DB
+# polling. Async (retain returns immediately) AND zero idle polling. Single
+# process only — a separate hindsight-worker still polls.
+ENV_WORKER_ON_DEMAND = "HINDSIGHT_API_WORKER_ON_DEMAND"
 ENV_WORKER_ID = "HINDSIGHT_API_WORKER_ID"
 ENV_WORKER_POLL_INTERVAL_MS = "HINDSIGHT_API_WORKER_POLL_INTERVAL_MS"
 ENV_WORKER_MAX_RETRIES = "HINDSIGHT_API_WORKER_MAX_RETRIES"
@@ -959,6 +964,10 @@ DEFAULT_WORKER_ENABLED = True  # API runs worker by default (standalone mode)
 # (no poller, no maintenance loop). Off by default; opt-in for single-process
 # deployments that want the database touched only during requests.
 DEFAULT_INLINE_TASKS = False
+# When True, the embedded worker runs but wakes on in-process task submission
+# instead of polling, giving async execution with no idle DB queries. Off by
+# default. Preferred over inline for always-on single-container deployments.
+DEFAULT_WORKER_ON_DEMAND = False
 DEFAULT_WORKER_ID = None  # Will use hostname if not specified
 DEFAULT_WORKER_POLL_INTERVAL_MS = 500  # Poll database every 500ms
 DEFAULT_WORKER_MAX_RETRIES = 3  # Max retries before marking task failed
@@ -1673,6 +1682,9 @@ class HindsightConfig:
     # Run background tasks inline within the request instead of via a poller.
     # Implies no worker poller and no background maintenance loop.
     inline_tasks: bool
+    # Keep the embedded worker but wake it on task submission instead of polling.
+    # Async execution with no idle DB polling; no background maintenance loop.
+    worker_on_demand: bool
     worker_id: str | None
     worker_poll_interval_ms: int
     worker_max_retries: int
@@ -2624,6 +2636,7 @@ class HindsightConfig:
             # Worker configuration
             worker_enabled=os.getenv(ENV_WORKER_ENABLED, str(DEFAULT_WORKER_ENABLED)).lower() == "true",
             inline_tasks=os.getenv(ENV_INLINE_TASKS, str(DEFAULT_INLINE_TASKS)).lower() == "true",
+            worker_on_demand=os.getenv(ENV_WORKER_ON_DEMAND, str(DEFAULT_WORKER_ON_DEMAND)).lower() == "true",
             worker_id=os.getenv(ENV_WORKER_ID) or DEFAULT_WORKER_ID,
             worker_poll_interval_ms=int(os.getenv(ENV_WORKER_POLL_INTERVAL_MS, str(DEFAULT_WORKER_POLL_INTERVAL_MS))),
             worker_max_retries=int(os.getenv(ENV_WORKER_MAX_RETRIES, str(DEFAULT_WORKER_MAX_RETRIES))),

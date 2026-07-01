@@ -40,6 +40,19 @@ class TaskBackend(ABC):
         """Initialize the task backend."""
         self._executor: Callable[[dict[str, Any]], Awaitable[None]] | None = None
         self._initialized = False
+        # Optional wake callback for the on-demand embedded worker (see
+        # set_wake_callback). None unless the API wired the poller in.
+        self._wake_callback: Callable[[], None] | None = None
+
+    def set_wake_callback(self, wake_callback: Callable[[], None]) -> None:
+        """Register a callback invoked right after a task is submitted.
+
+        Used by the on-demand embedded worker: because the API and worker share a
+        process, submit_task() calls this to wake the poller directly instead of
+        the poller discovering the new row by polling the database. Only
+        BrokerTaskBackend invokes it; other backends ignore it.
+        """
+        self._wake_callback = wake_callback
 
     def set_executor(self, executor: Callable[[dict[str, Any]], Awaitable[None]]):
         """
@@ -254,6 +267,15 @@ class BrokerTaskBackend(TaskBackend):
                     payload_json,
                 )
             logger.debug(f"Created new operation {new_id} for task type {task_type}")
+
+        # Wake the on-demand embedded worker now that the row is committed and
+        # visible. No-op when no callback is wired (polling / dedicated-worker
+        # deployments). Guarded so a wake failure never breaks submission.
+        if self._wake_callback is not None:
+            try:
+                self._wake_callback()
+            except Exception:
+                logger.warning("Task wake callback failed", exc_info=True)
 
     async def shutdown(self):
         """Shutdown the backend."""

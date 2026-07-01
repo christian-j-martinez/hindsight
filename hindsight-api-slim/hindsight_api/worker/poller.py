@@ -148,6 +148,7 @@ class WorkerPoller:
         max_slots: int = 10,
         slot_reservations: dict[str, int] | None = None,
         consolidation_bank_priority: dict[str, int] | None = None,
+        on_demand: bool = False,
     ):
         """
         Initialize the worker poller.
@@ -170,6 +171,12 @@ class WorkerPoller:
                 Patterns support ``*`` as wildcard. A bare ``*`` key is the catch-all default.
                 When set, consolidation tasks are claimed in priority tiers rather than
                 pure created_at order. None or empty dict preserves current behavior.
+            on_demand: When True (single-process embedded worker only), the run loop
+                blocks on an in-process event when idle instead of polling on
+                ``poll_interval_ms``. Task submission calls ``notify()`` to wake it.
+                Gives async execution with zero idle database queries. Requires the
+                poller to share the API's event loop; a separate hindsight-worker
+                cannot be signalled in-process and must keep polling.
         """
         self._backend = backend
         self._worker_id = worker_id
@@ -209,6 +216,14 @@ class WorkerPoller:
         # Rotation offset for per-tenant fair claiming. Advances past the last
         # schema we serviced so a busy tenant can't monopolize the poll order.
         self._next_schema_idx: int = 0
+        # On-demand mode: the run loop blocks on this event when idle instead of
+        # re-polling on a timer, and notify() (wired to task submission) sets it.
+        # Between requests the loop issues zero DB queries, so a scale-to-zero
+        # database can auto-suspend. _wake_timers holds timers that re-arm the
+        # event when a deferred/retried task becomes due.
+        self._on_demand: bool = on_demand
+        self._work_available: asyncio.Event = asyncio.Event()
+        self._wake_timers: set[asyncio.TimerHandle] = set()
 
     @staticmethod
     def _normalize_poll_schema(schema: str | None) -> str | None:
@@ -638,6 +653,9 @@ class WorkerPoller:
                 retry_at,
                 error_message,
             )
+        # On-demand mode has no polling loop to notice the retry becoming due, so
+        # re-arm the wake at retry_at (no-op in polling mode).
+        self._arm_wake_timer(retry_at)
         logger.warning(f"Task {operation_id} scheduled for retry at {retry_at}: {error_message}")
 
     async def _defer_operation(self, operation_id: str, exec_date: "Any", reason: str, schema: str | None):
@@ -658,6 +676,8 @@ class WorkerPoller:
                 operation_id,
                 exec_date,
             )
+        # Re-arm the on-demand wake for when the deferral elapses (no-op in polling mode).
+        self._arm_wake_timer(exec_date)
         logger.info(f"Task {operation_id} deferred until {exec_date}: {reason}")
 
     async def execute_task(self, task: ClaimedTask):
@@ -704,6 +724,13 @@ class WorkerPoller:
                     self._in_flight_by_type[operation_type] = count - 1
                     if self._in_flight_by_type[operation_type] == 0:
                         del self._in_flight_by_type[operation_type]
+
+        # On-demand mode has no polling loop to notice a freed slot, so a finished
+        # task must re-wake the loop to claim any work that a full slot pool held
+        # back (a burst larger than max_slots would otherwise stall until the next
+        # submission). No-op in polling mode.
+        if self._on_demand:
+            self._work_available.set()
 
     async def _execute_task_inner(self, task: ClaimedTask, holder: StageHolder | None = None):
         """Inner task execution with retry/fail handling.
@@ -890,6 +917,64 @@ class WorkerPoller:
             logger.error(f"Failed to recover batch operations for schema {schema_display}: {e}")
             return 0
 
+    def notify(self) -> None:
+        """Signal the on-demand run loop that work may be available.
+
+        Wired to the task backend (``set_wake_callback``) so an in-process
+        ``submit_task`` wakes the embedded poller immediately, replacing DB
+        polling. Setting the event is harmless in polling mode (the loop never
+        waits on it there). Must be called from the poller's own event loop.
+        """
+        self._work_available.set()
+
+    async def _wait_for_work(self) -> None:
+        """Block until notify() signals work or shutdown is requested (on-demand).
+
+        Waits on both the work event and the shutdown event so a graceful
+        shutdown unblocks immediately. Issues no database queries — the whole
+        point of on-demand mode is that an idle worker is silent.
+        """
+        shutdown_wait = asyncio.ensure_future(self._shutdown.wait())
+        work_wait = asyncio.ensure_future(self._work_available.wait())
+        try:
+            await asyncio.wait({shutdown_wait, work_wait}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for fut in (shutdown_wait, work_wait):
+                if not fut.done():
+                    fut.cancel()
+
+    def _arm_wake_timer(self, when: "Any") -> None:
+        """Schedule a self-wake at ``when`` so a deferred/retried task is picked up
+        without polling.
+
+        On-demand only. The claim query already gates on
+        ``next_retry_at <= NOW()``, so an early or imprecise wake is harmless — it
+        just yields an empty claim. On any error we wake immediately rather than
+        strand the task; it will re-arm or run on the next submission.
+        """
+        if not self._on_demand:
+            return
+        try:
+            from datetime import datetime, timezone
+
+            if isinstance(when, datetime):
+                due = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+                delay = max(0.0, (due - datetime.now(timezone.utc)).total_seconds())
+            else:
+                # Unknown/opaque timestamp type — fall back to the poll interval.
+                delay = self._poll_interval_ms / 1000
+            loop = asyncio.get_running_loop()
+        except Exception:
+            self._work_available.set()
+            return
+
+        def _fire() -> None:
+            self._wake_timers.discard(handle)
+            self._work_available.set()
+
+        handle = loop.call_later(delay, _fire)
+        self._wake_timers.add(handle)
+
     async def run(self):
         """
         Main polling loop with fire-and-forget task execution.
@@ -910,6 +995,13 @@ class WorkerPoller:
 
         while not self._shutdown.is_set():
             try:
+                # On-demand: clear the wake event before claiming so a submission
+                # that races this claim re-wakes us instead of being lost — any
+                # notify() after this point keeps _wait_for_work from blocking and
+                # the next iteration re-claims (lost-wakeup guard).
+                if self._on_demand:
+                    self._work_available.clear()
+
                 # Claim a batch of tasks (respecting slot limits)
                 tasks = await self.claim_batch()
 
@@ -942,17 +1034,24 @@ class WorkerPoller:
                     continue
 
                 # No tasks claimed (either no pending tasks or slots full)
-                # Wait before polling again
-                try:
-                    await asyncio.wait_for(
-                        self._shutdown.wait(),
-                        timeout=self._poll_interval_ms / 1000,
-                    )
-                except asyncio.TimeoutError:
-                    pass  # Normal timeout, continue polling
+                if self._on_demand:
+                    # Event-driven idle: block until notify() (an in-process task
+                    # submission or a re-armed retry timer) or shutdown. No polling
+                    # and no periodic stats query, so an idle deployment issues zero
+                    # DB queries and a scale-to-zero database can auto-suspend.
+                    await self._wait_for_work()
+                else:
+                    # Wait before polling again
+                    try:
+                        await asyncio.wait_for(
+                            self._shutdown.wait(),
+                            timeout=self._poll_interval_ms / 1000,
+                        )
+                    except asyncio.TimeoutError:
+                        pass  # Normal timeout, continue polling
 
-                # Log progress stats periodically
-                await self._log_progress_if_due()
+                    # Log progress stats periodically
+                    await self._log_progress_if_due()
 
             except asyncio.CancelledError:
                 logger.info(f"Worker {self._worker_id} polling loop cancelled")
@@ -974,6 +1073,11 @@ class WorkerPoller:
         """
         logger.info(f"Worker {self._worker_id} initiating graceful shutdown")
         self._shutdown.set()
+        # Unblock the on-demand idle wait and drop any pending retry-wake timers.
+        self._work_available.set()
+        for handle in self._wake_timers:
+            handle.cancel()
+        self._wake_timers.clear()
 
         # Wait for in-flight tasks to complete
         start_time = asyncio.get_event_loop().time()
