@@ -8,18 +8,22 @@ scale-to-zero database can auto-suspend between requests.
 These tests cover the deterministic mechanics with no DB or LLM:
   * config parsing;
   * the task backend waking the poller on submit;
-  * the poller blocking until notified and re-arming on a timer.
+  * the poller blocking until notified and re-arming on a timer;
+  * operation retry re-submitting through the task backend (wake source).
 """
 
 import asyncio
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from hindsight_api import MemoryEngine
 from hindsight_api.config import clear_config_cache, get_config
-from hindsight_api.engine.task_backend import BrokerTaskBackend
+from hindsight_api.engine.task_backend import BrokerTaskBackend, TaskBackend
+from hindsight_api.models import RequestContext
 from hindsight_api.worker import WorkerPoller
 
 
@@ -143,3 +147,96 @@ async def test_arm_wake_timer_sets_event_when_due():
 
     await asyncio.wait_for(poller._work_available.wait(), timeout=1.0)
     assert poller._work_available.is_set()
+
+
+class _RecordingTaskBackend(TaskBackend):
+    """Records submitted payloads instead of executing or queueing them."""
+
+    def __init__(self):
+        super().__init__()
+        self.submitted: list[dict] = []
+
+    async def initialize(self):
+        self._initialized = True
+
+    async def submit_task(self, task_dict):
+        self.submitted.append(task_dict)
+
+    async def shutdown(self):
+        self._initialized = False
+
+
+class _FakeRetryConn:
+    """Stands in for an asyncpg connection during retry_operation."""
+
+    def __init__(self, row):
+        self._row = row
+        self.executed = []
+
+    async def fetchrow(self, *args, **kwargs):
+        return self._row
+
+    async def execute(self, query, *args):
+        self.executed.append(query)
+
+
+class _FakeAcquireCtx:
+    def __init__(self, conn):
+        self._conn = conn
+
+    async def __aenter__(self):
+        return self._conn
+
+    async def __aexit__(self, *args):
+        return False
+
+
+def _engine_with_recorder() -> tuple[MemoryEngine, _RecordingTaskBackend]:
+    """MemoryEngine with mock models and a recording task backend (no DB/LLM)."""
+    recorder = _RecordingTaskBackend()
+    engine = MemoryEngine(
+        db_url="postgresql://placeholder/placeholder",
+        memory_llm_provider="none",
+        embeddings=MagicMock(),
+        cross_encoder=MagicMock(),
+        query_analyzer=MagicMock(),
+        run_migrations=False,
+        task_backend=recorder,
+    )
+    engine._authenticate_tenant = AsyncMock()
+    engine._get_backend = AsyncMock(return_value=MagicMock())
+    return engine, recorder
+
+
+@pytest.mark.asyncio
+async def test_retry_operation_resubmits_task(monkeypatch):
+    """Retrying a failed op must re-submit through the task backend: that wake is
+    how the on-demand worker learns about the row (and how inline mode executes
+    it) — a raw status reset would strand it until unrelated activity."""
+    from hindsight_api.engine import memory_engine as me
+
+    payload = {"type": "batch_retain", "operation_id": str(uuid.uuid4()), "bank_id": "b1"}
+    conn = _FakeRetryConn({"bank_id": "b1", "status": "failed", "task_payload": json.dumps(payload)})
+    monkeypatch.setattr(me, "acquire_with_retry", lambda pool: _FakeAcquireCtx(conn))
+
+    engine, recorder = _engine_with_recorder()
+    result = await engine.retry_operation("b1", payload["operation_id"], request_context=RequestContext())
+
+    assert result["success"] is True
+    assert recorder.submitted == [payload]
+    assert len(conn.executed) == 1  # the pending-reset UPDATE ran before the resubmit
+
+
+@pytest.mark.asyncio
+async def test_retry_operation_skips_resubmit_without_payload(monkeypatch):
+    """Parent batch_retain rows carry no task_payload — nothing to resubmit."""
+    from hindsight_api.engine import memory_engine as me
+
+    conn = _FakeRetryConn({"bank_id": "b1", "status": "cancelled", "task_payload": None})
+    monkeypatch.setattr(me, "acquire_with_retry", lambda pool: _FakeAcquireCtx(conn))
+
+    engine, recorder = _engine_with_recorder()
+    result = await engine.retry_operation("b1", str(uuid.uuid4()), request_context=RequestContext())
+
+    assert result["success"] is True
+    assert recorder.submitted == []

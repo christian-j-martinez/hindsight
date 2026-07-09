@@ -11442,7 +11442,8 @@ class MemoryEngine(MemoryEngineInterface):
 
         async with acquire_with_retry(backend) as conn:
             row = await conn.fetchrow(
-                f"SELECT bank_id, status FROM {fq_table('async_operations')} WHERE operation_id = $1 AND bank_id = $2",
+                f"SELECT bank_id, status, task_payload FROM {fq_table('async_operations')} "
+                f"WHERE operation_id = $1 AND bank_id = $2",
                 op_uuid,
                 bank_id,
             )
@@ -11455,6 +11456,8 @@ class MemoryEngine(MemoryEngineInterface):
                     f"Operation {operation_id} cannot be retried: status is '{row['status']}', expected 'failed' or 'cancelled'",
                     409,
                 )
+
+            task_payload = row["task_payload"]
 
             await conn.execute(
                 f"""
@@ -11472,11 +11475,25 @@ class MemoryEngine(MemoryEngineInterface):
                 op_uuid,
             )
 
-            return {
-                "success": True,
-                "message": f"Operation {operation_id} queued for retry",
-                "operation_id": operation_id,
-            }
+        # Re-submit through the task backend after the row is back to 'pending'.
+        # A polling worker would discover the row on its next cycle anyway, but
+        # the on-demand embedded worker only wakes on submission — without this
+        # a retried operation sits pending until unrelated activity wakes it —
+        # and in inline mode there is no worker at all, so submit_task is what
+        # executes the retry (synchronously, matching that mode's semantics).
+        # For BrokerTaskBackend this is a pure wake nudge: its UPDATE skips rows
+        # whose task_payload is already set. Parent batch_retain rows carry no
+        # task_payload (their status is driven by child completions), so there
+        # is nothing to resubmit for them.
+        if task_payload is not None:
+            payload_dict = json.loads(task_payload) if isinstance(task_payload, str) else task_payload
+            await self._task_backend.submit_task(payload_dict)
+
+        return {
+            "success": True,
+            "message": f"Operation {operation_id} queued for retry",
+            "operation_id": operation_id,
+        }
 
     async def update_bank(
         self,
