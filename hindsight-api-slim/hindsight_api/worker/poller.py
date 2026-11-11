@@ -383,6 +383,7 @@ class WorkerPoller:
         on_wall_timeout: Callable[[dict[str, Any], str | None, str, str], Awaitable[None]] | None = None,
         on_demand: bool = False,
         on_idle: Callable[[], None] | None = None,
+        recovery_settle_seconds: float = 0.0,
     ):
         """
         Initialize the worker poller.
@@ -425,6 +426,10 @@ class WorkerPoller:
                 nothing running and nothing to claim. The database is awake at that
                 point, so this is where periodic housekeeping can run without waking
                 it. Must return immediately; never called in polling mode.
+            recovery_settle_seconds: On-demand only. How long startup recovery waits
+                before reclaiming this worker id's rows, so that a process this one
+                is replacing has exited first (see ``_run_recovery``). 0 recovers
+                at once.
         """
         self._backend = backend
         self._worker_id = worker_id
@@ -469,6 +474,10 @@ class WorkerPoller:
         self._on_idle = on_idle
         self._work_available: asyncio.Event = asyncio.Event()
         self._wake_timers: set[asyncio.TimerHandle] = set()
+        self._recovery_settle_seconds: float = max(0.0, recovery_settle_seconds)
+        # Set once startup recovery has run: the on-demand loop then reclaims, the next
+        # time it is idle, whatever a replaced process claimed after this one started.
+        self._orphan_sweep_due: bool = False
         self._current_tasks: set[asyncio.Task] = set()
         self._in_flight_count = 0
         self._in_flight_lock = asyncio.Lock()
@@ -1946,15 +1955,52 @@ class WorkerPoller:
 
     async def _run_recovery(self, claimed_before: datetime) -> None:
         try:
+            if self._on_demand and self._recovery_settle_seconds > 0:
+                # A platform that starts the new container before stopping the old one
+                # (Railway) has both alive under one worker id for a few seconds.
+                # Reclaiming at once took a consolidation from under the old process,
+                # which was still polling, claimed the row again and was then killed
+                # holding it: 'processing' forever, since an idle on-demand loop never
+                # looks again. Waiting until the old process is gone avoids that, and
+                # the wake below also picks up whatever it handed back on its way out.
+                try:
+                    await asyncio.wait_for(self._shutdown.wait(), timeout=self._recovery_settle_seconds)
+                    return
+                except asyncio.TimeoutError:
+                    pass
             await self.recover_own_tasks(claimed_before=claimed_before)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception(f"Worker {self._worker_id} startup recovery failed")
         finally:
+            self._orphan_sweep_due = self._on_demand
             # Recovery runs beside the loop and hands rows back to 'pending' after the
             # loop's first claim: an on-demand loop already idle would never see them.
             self._work_available.set()
+
+    async def _reclaim_orphaned_tasks(self) -> int:
+        """Hand back rows still 'processing' under this worker id while nothing runs here.
+
+        Startup recovery only reaches rows claimed before this process started. A
+        process being replaced can claim one more row after that and be killed
+        holding it. The caller runs this from the poll loop with no task in flight,
+        so every such row is one nobody is running: the reasoning `release_own_tasks`
+        applies at shutdown.
+
+        Returns:
+            Number of operations returned to pending.
+        """
+        total_count = 0
+        for schema in await self._get_schemas():
+            try:
+                total_count += await self._reclaim_own_processing_tasks(schema)
+            except Exception as e:
+                schema_display = f'"{schema}"' if schema else str(schema)
+                logger.warning(f"Worker {self._worker_id} failed to reclaim tasks for schema {schema_display}: {e}")
+        if total_count:
+            logger.warning(f"Worker {self._worker_id} returned {total_count} orphaned operations to 'pending'")
+        return total_count
 
     def notify(self) -> None:
         """Signal the on-demand run loop that work may be available.
@@ -2071,6 +2117,10 @@ class WorkerPoller:
                     # no progress-stats query, so an idle deployment issues zero DB
                     # queries. With tasks in flight the database is in use anyway, so
                     # the loop polls as usual below until they drain.
+                    if self._orphan_sweep_due:
+                        self._orphan_sweep_due = False
+                        if await self._reclaim_orphaned_tasks():
+                            continue
                     self._announce_idle()
                     await self._wait_for_wake()
                     continue

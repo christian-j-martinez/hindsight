@@ -4497,6 +4497,7 @@ def create_app(
                 on_wall_timeout=memory.on_task_wall_timeout,
                 on_demand=config.worker_on_demand,
                 on_idle=memory.run_maintenance_soon if config.worker_on_demand else None,
+                recovery_settle_seconds=config.worker_on_demand_recovery_delay_seconds,
             )
             if config.worker_on_demand:
                 # Wake this in-process poller on each task submission instead of

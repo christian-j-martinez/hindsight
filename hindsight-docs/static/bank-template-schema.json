@@ -824,6 +824,32 @@
           "description": "Default for recall min_scores.final when the request omits it (cross-encoder reranker only); 0 disables the floor",
           "title": "Recall Min Score"
         },
+        "mcp_recall_max_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Ceiling on the MCP recall tool's max_tokens; 0 means no ceiling",
+          "title": "Mcp Recall Max Tokens"
+        },
+        "mcp_recall_compact": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "MCP recall tool returns only id, text, fact_type and a date per result",
+          "title": "Mcp Recall Compact"
+        },
         "recall_chunks_max_tokens": {
           "anyOf": [
             {

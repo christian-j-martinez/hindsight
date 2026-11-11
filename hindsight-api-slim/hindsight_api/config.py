@@ -1067,6 +1067,7 @@ ENV_INLINE_TASKS = "HINDSIGHT_API_INLINE_TASKS"
 # polling. Async (retain returns immediately) AND zero idle polling. Single
 # process only — a separate hindsight-worker still polls.
 ENV_WORKER_ON_DEMAND = "HINDSIGHT_API_WORKER_ON_DEMAND"
+ENV_WORKER_ON_DEMAND_RECOVERY_DELAY_SECONDS = "HINDSIGHT_API_WORKER_ON_DEMAND_RECOVERY_DELAY_SECONDS"
 ENV_WORKER_ID = "HINDSIGHT_API_WORKER_ID"
 ENV_WORKER_POLL_INTERVAL_MS = "HINDSIGHT_API_WORKER_POLL_INTERVAL_MS"
 ENV_WORKER_MAX_RETRIES = "HINDSIGHT_API_WORKER_MAX_RETRIES"
@@ -1184,6 +1185,9 @@ ENV_RECALL_BUDGET_MIN = "HINDSIGHT_API_RECALL_BUDGET_MIN"
 ENV_RECALL_BUDGET_MAX = "HINDSIGHT_API_RECALL_BUDGET_MAX"
 # FORK: minimum post-rerank relevance score a fact must meet to be returned.
 ENV_RECALL_MIN_SCORE = "HINDSIGHT_API_RECALL_MIN_SCORE"
+# FORK: limits on what the MCP recall tool hands a chat client.
+ENV_MCP_RECALL_MAX_TOKENS = "HINDSIGHT_API_MCP_RECALL_MAX_TOKENS"
+ENV_MCP_RECALL_COMPACT = "HINDSIGHT_API_MCP_RECALL_COMPACT"
 
 # Recall candidate gating (per-source cap + BM25 score floor)
 ENV_BM25_MIN_SCORE = "HINDSIGHT_API_BM25_MIN_SCORE"
@@ -2139,6 +2143,11 @@ DEFAULT_INLINE_TASKS = False
 # instead of polling, giving async execution with no idle DB queries. Off by
 # default. Preferred over inline for always-on single-container deployments.
 DEFAULT_WORKER_ON_DEMAND = False
+# How long after startup an on-demand worker waits before taking over tasks a previous
+# process left 'processing' under its worker id. It has to outlast a container that is
+# being replaced: the platform's switch-over plus that container's shutdown drain. About
+# 15s was measured on Railway; a longer wait only delays recovery after a crash.
+DEFAULT_WORKER_ON_DEMAND_RECOVERY_DELAY_SECONDS = 60.0
 DEFAULT_WORKER_ID = None  # Will use hostname if not specified
 DEFAULT_WORKER_POLL_INTERVAL_MS = 500  # Poll database every 500ms
 DEFAULT_WORKER_MAX_RETRIES = 3  # Max retries before marking task failed
@@ -2243,6 +2252,15 @@ DEFAULT_RECALL_BUDGET_MAX = 2000  # Ceiling for the adaptive function
 # Only applied to cross-encoder reranking (scores from passthrough rerankers are
 # not calibrated relevance values). Tune live via the bank's recall_min_score.
 DEFAULT_RECALL_MIN_SCORE = 0.0
+
+# FORK: Ceiling on the MCP recall tool's max_tokens. That argument is chosen by the
+# calling model (tool default 4096), so without a ceiling one chat turn can pull in
+# as many memories as it asks for. 0 = no ceiling (upstream behavior).
+DEFAULT_MCP_RECALL_MAX_TOKENS = 0
+# FORK: When true, the MCP recall tool returns only id, text, type and dates per
+# result. Scores, tags and document/chunk ids are roughly three quarters of a full
+# response and a chat model has no use for them.
+DEFAULT_MCP_RECALL_COMPACT = False
 
 # Disposition defaults (None = not set, fall back to bank DB value or 3)
 DEFAULT_DISPOSITION_SKEPTICISM = None
@@ -3973,6 +3991,9 @@ class HindsightConfig:
     recall_budget_max: int
     # FORK: minimum relevance score [~0.0-1.0]; results scoring below are dropped (0.0 = disabled)
     recall_min_score: float
+    # FORK: MCP recall tool limits (0 = no token ceiling; compact = id/text/type/dates only)
+    mcp_recall_max_tokens: int
+    mcp_recall_compact: bool
 
     # Disposition settings (hierarchical - can be overridden per bank; None = fall back to DB)
     disposition_skepticism: int | None
@@ -4010,6 +4031,7 @@ class HindsightConfig:
     # Async execution with no idle DB polling; maintenance runs when the worker goes
     # idle after work instead of on a timer.
     worker_on_demand: bool
+    worker_on_demand_recovery_delay_seconds: float
     worker_id: str | None
     worker_poll_interval_ms: int
     worker_max_retries: int
@@ -4383,6 +4405,8 @@ class HindsightConfig:
         "recall_budget_min",
         "recall_budget_max",
         "recall_min_score",  # FORK: relevance threshold (live-tunable per bank)
+        "mcp_recall_max_tokens",  # FORK: ceiling on MCP recall max_tokens
+        "mcp_recall_compact",  # FORK: slim MCP recall results
         # Disposition settings
         "disposition_skepticism",
         "disposition_literalism",
@@ -5824,6 +5848,11 @@ class HindsightConfig:
             worker_enabled=os.getenv(ENV_WORKER_ENABLED, str(DEFAULT_WORKER_ENABLED)).lower() == "true",
             inline_tasks=os.getenv(ENV_INLINE_TASKS, str(DEFAULT_INLINE_TASKS)).lower() == "true",
             worker_on_demand=os.getenv(ENV_WORKER_ON_DEMAND, str(DEFAULT_WORKER_ON_DEMAND)).lower() == "true",
+            worker_on_demand_recovery_delay_seconds=float(
+                os.getenv(
+                    ENV_WORKER_ON_DEMAND_RECOVERY_DELAY_SECONDS, str(DEFAULT_WORKER_ON_DEMAND_RECOVERY_DELAY_SECONDS)
+                )
+            ),
             worker_id=os.getenv(ENV_WORKER_ID) or DEFAULT_WORKER_ID,
             worker_poll_interval_ms=int(os.getenv(ENV_WORKER_POLL_INTERVAL_MS, str(DEFAULT_WORKER_POLL_INTERVAL_MS))),
             worker_max_retries=int(os.getenv(ENV_WORKER_MAX_RETRIES, str(DEFAULT_WORKER_MAX_RETRIES))),
@@ -5935,6 +5964,9 @@ class HindsightConfig:
             recall_budget_min=int(os.getenv(ENV_RECALL_BUDGET_MIN, str(DEFAULT_RECALL_BUDGET_MIN))),
             recall_budget_max=int(os.getenv(ENV_RECALL_BUDGET_MAX, str(DEFAULT_RECALL_BUDGET_MAX))),
             recall_min_score=float(os.getenv(ENV_RECALL_MIN_SCORE, str(DEFAULT_RECALL_MIN_SCORE))),  # FORK
+            mcp_recall_max_tokens=int(os.getenv(ENV_MCP_RECALL_MAX_TOKENS, str(DEFAULT_MCP_RECALL_MAX_TOKENS))),  # FORK
+            mcp_recall_compact=os.getenv(ENV_MCP_RECALL_COMPACT, str(DEFAULT_MCP_RECALL_COMPACT)).lower()
+            == "true",  # FORK
             # Disposition settings (None = fall back to DB value)
             disposition_skepticism=_env_int_or(ENV_DISPOSITION_SKEPTICISM, DEFAULT_DISPOSITION_SKEPTICISM),
             disposition_literalism=_env_int_or(ENV_DISPOSITION_LITERALISM, DEFAULT_DISPOSITION_LITERALISM),

@@ -139,6 +139,8 @@ _SAMPLE_VALUES: dict[str, Any] = {
     "recall_decision_model_dedup": True,
     "recall_max_tokens": 9000,
     "recall_min_score": 0.25,
+    "mcp_recall_max_tokens": 600,
+    "mcp_recall_compact": True,
     "recall_chunks_max_tokens": 4500,
     # Validated against the DefensePolicy schema on write (parse_policy), so this
     # must be a real policy — and carrying a rule means the round-trip covers the

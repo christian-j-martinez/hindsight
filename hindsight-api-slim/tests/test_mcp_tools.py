@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from hindsight_api.engine import page_markdown
 from hindsight_api.engine.memory_engine import KEEP_PARENT, DirectivePage, MentalModelPage
-from hindsight_api.engine.response_models import MemoryFact, RecallResult
+from hindsight_api.engine.response_models import ChunkInfo, MemoryFact, RecallResult, RecallScores
 from hindsight_api.mcp_tools import (
     _ALL_TOOLS,
     PAGE_ROOT_PARENT,
@@ -262,6 +262,7 @@ def mock_memory():
     # Only recall/reflect tools read from the resolver; update_bank now owns both
     # the profile and the config write, so its assertions belong on that mock.
     memory._config_resolver = MagicMock()
+    memory._config_resolver.get_bank_config = AsyncMock(return_value={})
 
     async def _update_bank(
         bank_id: str,
@@ -2873,6 +2874,131 @@ class TestRecallResponseSize:
         # An agent sizes its context from this line, so it must say what the budget covers.
         assert "'text' counts" in max_tokens_doc
         assert "several times larger" in max_tokens_doc
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_bank_id", [True, False])
+class TestRecallBankLimits:
+    """The calling model chooses max_tokens and gets every field of every result; a bank
+    can bound both (mcp_recall_max_tokens, mcp_recall_compact)."""
+
+    @staticmethod
+    def _limit(mock_memory, **bank_config) -> None:
+        mock_memory._config_resolver.get_bank_config = AsyncMock(return_value=bank_config)
+
+    @staticmethod
+    async def _recall(mock_memory, include_bank_id, **arguments) -> dict:
+        mcp = _make_mcp_server(mock_memory, {"recall"}, include_bank_id=include_bank_id)
+        out = await _tools(mcp)["recall"].fn(query="test", **arguments)
+        return json.loads(out) if include_bank_id else out
+
+    async def test_bank_ceiling_lowers_the_default_budget(self, mock_memory, include_bank_id):
+        self._limit(mock_memory, mcp_recall_max_tokens=600)
+        await self._recall(mock_memory, include_bank_id)
+        assert mock_memory.recall_async.call_args.kwargs["max_tokens"] == 600
+
+    async def test_bank_ceiling_wins_over_a_larger_request(self, mock_memory, include_bank_id):
+        self._limit(mock_memory, mcp_recall_max_tokens=600)
+        await self._recall(mock_memory, include_bank_id, max_tokens=20000)
+        assert mock_memory.recall_async.call_args.kwargs["max_tokens"] == 600
+
+    async def test_a_smaller_request_is_left_alone(self, mock_memory, include_bank_id):
+        self._limit(mock_memory, mcp_recall_max_tokens=600)
+        await self._recall(mock_memory, include_bank_id, max_tokens=200)
+        assert mock_memory.recall_async.call_args.kwargs["max_tokens"] == 200
+
+    @pytest.mark.parametrize("bank_config", [{}, {"mcp_recall_max_tokens": 0}])
+    async def test_no_ceiling_by_default(self, mock_memory, include_bank_id, bank_config):
+        self._limit(mock_memory, **bank_config)
+        await self._recall(mock_memory, include_bank_id, max_tokens=20000)
+        assert mock_memory.recall_async.call_args.kwargs["max_tokens"] == 20000
+
+    async def test_limits_are_read_for_the_bank_being_recalled(self, mock_memory, include_bank_id):
+        self._limit(mock_memory, mcp_recall_max_tokens=600)
+        await self._recall(mock_memory, include_bank_id)
+        assert mock_memory._config_resolver.get_bank_config.call_args.args[0] == "test-bank"
+
+    async def test_compact_keeps_text_type_day_and_id(self, mock_memory, include_bank_id):
+        self._limit(mock_memory, mcp_recall_compact=True)
+        mock_memory.recall_async = AsyncMock(
+            return_value=RecallResult(
+                results=[
+                    MemoryFact(
+                        id="fact-1",
+                        text="moved to Lisbon",
+                        fact_type="world",
+                        entities=["Lisbon"],
+                        occurred_start="2024-03-02T09:00:00+00:00",
+                        mentioned_at="2026-09-28T00:00:00+00:00",
+                        document_id="doc-1",
+                        chunk_id="bank_doc-1_0",
+                        tags=["project:x"],
+                        scores=RecallScores(final=0.9, reranker=0.8),
+                    ),
+                    MemoryFact(
+                        id="obs-1",
+                        text="prefers trains",
+                        fact_type="observation",
+                        mentioned_at="2026-09-28T00:00:00+00:00",
+                    ),
+                    MemoryFact(id="fact-2", text="undated", fact_type="experience"),
+                ]
+            )
+        )
+
+        out = await self._recall(mock_memory, include_bank_id)
+
+        assert out == {
+            "results": [
+                {"id": "fact-1", "text": "moved to Lisbon", "fact_type": "world", "date": "2024-03-02"},
+                {"id": "obs-1", "text": "prefers trains", "fact_type": "observation", "date": "2026-09-28"},
+                {"id": "fact-2", "text": "undated", "fact_type": "experience"},
+            ]
+        }
+
+    async def test_compact_keeps_the_sections_the_caller_asked_for(self, mock_memory, include_bank_id):
+        """Chunks and source facts are only useful with the keys that tie results to them."""
+        self._limit(mock_memory, mcp_recall_compact=True)
+        source = MemoryFact(id="fact-9", text="took the night train", fact_type="experience")
+        mock_memory.recall_async = AsyncMock(
+            return_value=RecallResult(
+                results=[
+                    MemoryFact(
+                        id="obs-1",
+                        text="prefers trains",
+                        fact_type="observation",
+                        chunk_id="bank_doc-1_0",
+                        source_fact_ids=["fact-9"],
+                    )
+                ],
+                chunks={"bank_doc-1_0": ChunkInfo(chunk_text="raw text", chunk_index=0)},
+                source_facts={"fact-9": source},
+                source_facts_truncated=False,
+            )
+        )
+
+        out = await self._recall(mock_memory, include_bank_id, include_chunks=True, include_source_facts=True)
+
+        assert out["results"] == [
+            {
+                "id": "obs-1",
+                "text": "prefers trains",
+                "fact_type": "observation",
+                "chunk_id": "bank_doc-1_0",
+                "source_fact_ids": ["fact-9"],
+            }
+        ]
+        assert out["chunks"] == {"bank_doc-1_0": {"chunk_text": "raw text", "chunk_index": 0, "truncated": False}}
+        assert out["source_facts"]["fact-9"]["text"] == "took the night train"
+        assert out["source_facts_truncated"] is False
+
+    async def test_full_results_by_default(self, mock_memory, include_bank_id):
+        result = TestRecallResponseSize._result()
+        mock_memory.recall_async = AsyncMock(return_value=result)
+
+        out = await self._recall(mock_memory, include_bank_id)
+
+        assert out == json.loads(result.model_dump_json())
 
 
 @pytest.mark.asyncio

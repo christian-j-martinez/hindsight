@@ -22661,6 +22661,10 @@ class MemoryEngine(MemoryEngineInterface):
             except Exception as e:
                 logger.warning(f"Failed to roll cancellation of {operation_id} up to its parent: {e}")
 
+            # Cancelling a 'processing' row frees its bank's slot, so an operation queued
+            # behind it becomes claimable without a submit to tell an on-demand worker.
+            self._task_backend.wake()
+
             return {
                 "success": True,
                 "message": f"Operation {operation_id} cancelled",
@@ -23487,6 +23491,9 @@ class MemoryEngine(MemoryEngineInterface):
                                 f"{operation_type} task already {row['status']} for bank_id={bank_id}, "
                                 f"skipping duplicate (existing operation_id={row['operation_id']})"
                             )
+                            # Asking again is how a caller nudges a queue that looks stuck:
+                            # the row it folds into may be one an on-demand worker never saw.
+                            self._task_backend.wake()
                             return {
                                 "operation_id": str(row["operation_id"]),
                                 "deduplicated": True,
@@ -23540,6 +23547,7 @@ class MemoryEngine(MemoryEngineInterface):
                             f"{dedupe_in_flight_payload_key}={subject}, skipping duplicate "
                             f"(existing operation_id={existing_id})"
                         )
+                        self._task_backend.wake()
                         return {
                             "operation_id": str(existing_id),
                             "deduplicated": True,

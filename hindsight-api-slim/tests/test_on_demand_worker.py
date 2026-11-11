@@ -10,8 +10,10 @@ These tests cover the deterministic mechanics with no DB or LLM:
   * the task backend waking the poller on submit;
   * the poll loop going silent when idle, and polling again while tasks run;
   * the wake sources that replace polling: submit, retry timers, startup recovery;
+  * recovery leaving a process this one is replacing alone until it has exited;
   * maintenance running when the worker goes idle, in place of the timer;
-  * operation retry re-submitting through the task backend (wake source).
+  * operation retry re-submitting through the task backend (wake source);
+  * cancel and a folded submit waking the worker, since neither submits a task.
 """
 
 import asyncio
@@ -117,7 +119,7 @@ async def test_failing_wake_callback_does_not_break_submit(monkeypatch):
     await backend.submit_task({"type": "retain", "operation_id": str(uuid.uuid4()), "bank_id": "b"})
 
 
-def _make_poller(*, on_demand: bool = True, on_idle=None) -> WorkerPoller:
+def _make_poller(*, on_demand: bool = True, on_idle=None, recovery_settle_seconds: float = 0.0) -> WorkerPoller:
     poller = WorkerPoller(
         backend=MagicMock(),
         worker_id="on-demand-test",
@@ -125,6 +127,7 @@ def _make_poller(*, on_demand: bool = True, on_idle=None) -> WorkerPoller:
         poll_interval_ms=POLL_INTERVAL_MS,
         on_demand=on_demand,
         on_idle=on_idle,
+        recovery_settle_seconds=recovery_settle_seconds,
     )
     # The loop's only database work when nothing is claimable.
     poller.claim_batch = AsyncMock(return_value=[])
@@ -267,6 +270,99 @@ async def test_startup_recovery_wakes_the_loop():
     await poller._run_recovery(datetime.now(timezone.utc))
 
     assert poller._work_available.is_set()
+
+
+class TestReplacedProcess:
+    """A deploy starts the new container before stopping the old one, so for a few
+    seconds two processes share a worker id. Taking the old one's rows while it still
+    runs left them claimed by a process that was then killed."""
+
+    @pytest.mark.asyncio
+    async def test_recovery_waits_for_the_old_process_to_exit(self):
+        poller = _make_poller(recovery_settle_seconds=SETTLE_SECONDS)
+        poller.recover_own_tasks = AsyncMock(return_value=1)
+        recovery = asyncio.ensure_future(poller._run_recovery(datetime.now(timezone.utc)))
+
+        await asyncio.sleep(SETTLE_SECONDS / 2)
+        poller.recover_own_tasks.assert_not_awaited()
+        assert not poller._work_available.is_set()
+
+        await asyncio.wait_for(recovery, timeout=1.0)
+        poller.recover_own_tasks.assert_awaited_once()
+        assert poller._work_available.is_set()
+
+    @pytest.mark.asyncio
+    async def test_polling_mode_recovers_at_once(self):
+        poller = _make_poller(on_demand=False, recovery_settle_seconds=60.0)
+        poller.recover_own_tasks = AsyncMock(return_value=0)
+
+        await asyncio.wait_for(poller._run_recovery(datetime.now(timezone.utc)), timeout=1.0)
+
+        poller.recover_own_tasks.assert_awaited_once()
+        assert not poller._orphan_sweep_due
+
+    @pytest.mark.asyncio
+    async def test_shutdown_during_the_wait_skips_recovery(self):
+        poller = _make_poller(recovery_settle_seconds=60.0)
+        poller.recover_own_tasks = AsyncMock(return_value=0)
+        recovery = asyncio.ensure_future(poller._run_recovery(datetime.now(timezone.utc)))
+        await asyncio.sleep(0)
+
+        poller.begin_shutdown()
+        await asyncio.wait_for(recovery, timeout=1.0)
+
+        poller.recover_own_tasks.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_idle_loop_reclaims_what_the_old_process_claimed_late(self):
+        """Recovery only reaches rows claimed before this process started. One the old
+        process claimed after that is handed back the first time nothing runs here,
+        and claimed in the same pass rather than after the next wake."""
+        poller = _make_poller()
+        poller.recover_own_tasks = AsyncMock(return_value=0)
+        poller._reclaim_orphaned_tasks = AsyncMock(return_value=1)
+        await poller._run_recovery(datetime.now(timezone.utc))
+
+        loop_task = asyncio.ensure_future(poller._poll_loop())
+        await asyncio.sleep(SETTLE_SECONDS)
+
+        poller._reclaim_orphaned_tasks.assert_awaited_once()
+        assert poller.claim_batch.await_count == 2
+        await _stop(poller, loop_task)
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_reclaimed_while_a_task_runs_here(self):
+        """A row 'processing' under this worker id may be the one this process is
+        running, so the sweep waits until nothing is."""
+        poller = _make_poller()
+        poller.recover_own_tasks = AsyncMock(return_value=0)
+        poller._reclaim_orphaned_tasks = AsyncMock(return_value=0)
+        await poller._run_recovery(datetime.now(timezone.utc))
+        poller._in_flight_count = 1
+
+        loop_task = asyncio.ensure_future(poller._poll_loop())
+        await asyncio.sleep(SETTLE_SECONDS)
+        poller._reclaim_orphaned_tasks.assert_not_awaited()
+
+        poller._in_flight_count = 0
+        await asyncio.sleep(SETTLE_SECONDS)
+
+        poller._reclaim_orphaned_tasks.assert_awaited_once()
+        await _stop(poller, loop_task)
+
+    @pytest.mark.asyncio
+    async def test_reclaim_covers_every_schema_without_a_claim_time_cutoff(self):
+        poller = _make_poller()
+        poller._get_schemas = AsyncMock(return_value=[None, "tenant_a"])
+        poller._reclaim_own_processing_tasks = AsyncMock(side_effect=[1, 2])
+
+        assert await poller._reclaim_orphaned_tasks() == 3
+
+        assert [call.args for call in poller._reclaim_own_processing_tasks.await_args_list] == [
+            (None,),
+            ("tenant_a",),
+        ]
+        assert all(not call.kwargs for call in poller._reclaim_own_processing_tasks.await_args_list)
 
 
 class TestIdleAnnouncement:
@@ -584,3 +680,54 @@ async def test_retry_of_a_non_retryable_operation_submits_nothing(monkeypatch):
 
     assert exc.value.status_code == 409
     assert recorder.submitted == []
+
+
+class _FakeTransactionConn(_FakeRetryConn):
+    """Adds what the submit and cancel paths need on top of the retry stand-in."""
+
+    def __init__(self, fetchrow_results: list[Any] | None = None, pending: list[dict] | None = None):
+        super().__init__(fetchrow_results or [], children=pending)
+
+    def transaction(self):
+        return _FakeAcquireCtx(self)
+
+    async def fetchval(self, *args, **kwargs):
+        return 1
+
+
+def _wakes(recorder: _RecordingTaskBackend) -> list[bool]:
+    wakes: list[bool] = []
+    recorder.set_wake_callback(lambda: wakes.append(True))
+    return wakes
+
+
+@pytest.mark.asyncio
+async def test_cancel_operation_wakes_the_worker(monkeypatch):
+    """Cancelling a 'processing' row frees its bank's slot: the operation queued behind
+    it is claimable, and no submit happened to tell an idle on-demand worker."""
+    operation_id = str(uuid.uuid4())
+    conn = _FakeTransactionConn([{"bank_id": "b1", "status": "processing"}, {"status": "cancelled"}])
+    engine, recorder = _engine_with_recorder(monkeypatch, conn)
+    engine._maybe_update_parent_operation = AsyncMock()
+    wakes = _wakes(recorder)
+
+    result = await engine.cancel_operation("b1", operation_id, request_context=RequestContext())
+
+    assert result["success"] is True
+    assert wakes == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_folded_submit_wakes_the_worker(monkeypatch):
+    """A consolidation request that folds into the one already queued submits no task,
+    but it is how a caller nudges a queue that looks stuck, so it must reach the worker."""
+    existing_id = uuid.uuid4()
+    conn = _FakeTransactionConn(pending=[{"operation_id": existing_id, "task_payload": "{}", "status": "pending"}])
+    engine, recorder = _engine_with_recorder(monkeypatch, conn)
+    wakes = _wakes(recorder)
+
+    result = await engine._submit_async_operation("b1", "consolidation", "consolidation", {}, dedupe_by_bank=True)
+
+    assert result == {"operation_id": str(existing_id), "deduplicated": True}
+    assert recorder.submitted == []
+    assert wakes == [True]

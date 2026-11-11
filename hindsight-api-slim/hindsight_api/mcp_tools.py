@@ -29,6 +29,7 @@ from hindsight_api.engine.response_models import (
     VALID_RECALL_FACT_TYPES,
     Budget,
     MinScores,
+    RecallResult,
     RerankOptions,
     TemporalWindow,
 )
@@ -510,6 +511,55 @@ def _get_request_context(config: MCPToolsConfig) -> RequestContext:
         mcp_authenticated=mcp_authenticated,
         extra_headers=extra_headers,
     )
+
+
+@dataclass(frozen=True)
+class _RecallLimits:
+    """FORK: what a bank lets the recall tool hand a chat client.
+
+    The calling model picks ``max_tokens`` and receives every field of every result, so
+    without these a single recall on a well-covered topic puts over ten thousand tokens
+    into the conversation, three quarters of it scores, tags and ids.
+    """
+
+    max_tokens: int
+    compact: bool
+
+    def cap(self, requested: int) -> int:
+        return min(requested, self.max_tokens) if self.max_tokens > 0 else requested
+
+
+async def _recall_limits(memory: MemoryEngine, config: MCPToolsConfig, bank_id: str) -> _RecallLimits:
+    bank_cfg = await memory._config_resolver.get_bank_config(bank_id, _get_request_context(config))
+    return _RecallLimits(
+        max_tokens=int(bank_cfg.get("mcp_recall_max_tokens") or 0),
+        compact=bool(bank_cfg.get("mcp_recall_compact")),
+    )
+
+
+def _compact_recall(result: RecallResult) -> dict[str, Any]:
+    """A recall result cut down to what a chat model reads.
+
+    Each result keeps its text, type, one day-precision date and the id that
+    ``get_memory`` takes to fetch everything dropped here. Sections the caller asked
+    for (chunks, entities, source facts) are kept whole, along with the result keys
+    that point into them.
+    """
+    facts: list[dict[str, Any]] = []
+    for fact in result.results:
+        entry: dict[str, Any] = {"id": fact.id, "text": fact.text, "fact_type": fact.fact_type}
+        when = fact.occurred_start or fact.mentioned_at
+        if when:
+            entry["date"] = when[:10]
+        if result.chunks is not None and fact.chunk_id:
+            entry["chunk_id"] = fact.chunk_id
+        if fact.source_fact_ids:
+            entry["source_fact_ids"] = fact.source_fact_ids
+        facts.append(entry)
+    sections = result.model_dump(
+        include={"entities", "chunks", "source_facts", "source_facts_truncated"}, exclude_none=True
+    )
+    return {"results": facts, **sections}
 
 
 def parse_timestamp(timestamp: str) -> datetime | None:
@@ -1298,7 +1348,8 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                 query: Natural language search query (e.g., "user's food preferences", "what projects is user working on")
                 max_tokens: Token budget for the facts' text (default: 4096). Only each result's
                     'text' counts; the id, tags, scores and dates sent with every result do not,
-                    so the response is several times larger than this.
+                    so the response is several times larger than this. A bank can set a lower
+                    ceiling (mcp_recall_max_tokens), which wins over a larger value passed here.
                 budget: Search budget - 'low', 'mid', or 'high' (default: 'high'). Higher budgets search more thoroughly.
                 types: Fact types to include (e.g., ['world', 'experience']). Default: all types.
                 prefer_observations: When recalling raw facts together with 'observation', drop any raw fact
@@ -1360,6 +1411,7 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                 budget_map = {"low": Budget.LOW, "mid": Budget.MID, "high": Budget.HIGH}
                 budget_enum = budget_map.get(budget.lower(), Budget.HIGH)
                 fact_types = types if types is not None else list(VALID_RECALL_FACT_TYPES)
+                limits = await _recall_limits(memory, config, target_bank)
 
                 recall_kwargs: dict[str, Any] = {
                     "bank_id": target_bank,
@@ -1367,7 +1419,7 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                     "fact_type": fact_types,
                     "prefer_observations": prefer_observations,
                     "budget": budget_enum,
-                    "max_tokens": max_tokens,
+                    "max_tokens": limits.cap(max_tokens),
                     "include_chunks": include_chunks,
                     "max_chunk_tokens": max_chunk_tokens,
                     "include_entities": include_entities,
@@ -1394,6 +1446,8 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
 
                 recall_result = await memory.recall_async(**recall_kwargs)
 
+                if limits.compact:
+                    return json.dumps(_compact_recall(recall_result))
                 # Compact, as FastMCP already sends the session-bank copy's dict. This
                 # used indent=2, which was about a fifth of a recall response that
                 # lands whole in the calling agent's context.
@@ -1435,7 +1489,8 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                 query: Natural language search query (e.g., "user's food preferences", "what projects is user working on")
                 max_tokens: Token budget for the facts' text (default: 4096). Only each result's
                     'text' counts; the id, tags, scores and dates sent with every result do not,
-                    so the response is several times larger than this.
+                    so the response is several times larger than this. A bank can set a lower
+                    ceiling (mcp_recall_max_tokens), which wins over a larger value passed here.
                 budget: Search budget - 'low', 'mid', or 'high' (default: 'high'). Higher budgets search more thoroughly.
                 types: Fact types to include (e.g., ['world', 'experience']). Default: all types.
                 prefer_observations: When recalling raw facts together with 'observation', drop any raw fact
@@ -1496,6 +1551,7 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                 budget_map = {"low": Budget.LOW, "mid": Budget.MID, "high": Budget.HIGH}
                 budget_enum = budget_map.get(budget.lower(), Budget.HIGH)
                 fact_types = types if types is not None else list(VALID_RECALL_FACT_TYPES)
+                limits = await _recall_limits(memory, config, target_bank)
 
                 recall_kwargs: dict[str, Any] = {
                     "bank_id": target_bank,
@@ -1503,7 +1559,7 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
                     "fact_type": fact_types,
                     "prefer_observations": prefer_observations,
                     "budget": budget_enum,
-                    "max_tokens": max_tokens,
+                    "max_tokens": limits.cap(max_tokens),
                     "include_chunks": include_chunks,
                     "max_chunk_tokens": max_chunk_tokens,
                     "include_entities": include_entities,
@@ -1530,6 +1586,8 @@ def _register_recall(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsConfig)
 
                 recall_result = await memory.recall_async(**recall_kwargs)
 
+                if limits.compact:
+                    return _compact_recall(recall_result)
                 return recall_result.model_dump()
             except OperationValidationError as e:
                 logger.warning(f"Recall rejected: {e}")
@@ -4558,6 +4616,8 @@ def _register_update_bank(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsCo
                     - recall_prefer_observations: Default prefer_observations for recall requests that omit it.
                     - recall_max_tokens: Max tokens for recall results.
                     - recall_min_score: Default min_scores.final for recall requests that omit it (0 disables).
+                    - mcp_recall_max_tokens: Ceiling on the recall tool's max_tokens (0 = none).
+                    - mcp_recall_compact: Recall tool returns only id, text, type and date per result.
                     - mcp_enabled_tools: Tool allowlist for this bank.
                     Any configurable field name is accepted (use Python field names).
                 bank_id: Optional bank (defaults to session bank). Use for cross-bank operations.
@@ -4608,6 +4668,8 @@ def _register_update_bank(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsCo
                     - recall_prefer_observations: Default prefer_observations for recall requests that omit it.
                     - recall_max_tokens: Max tokens for recall results.
                     - recall_min_score: Default min_scores.final for recall requests that omit it (0 disables).
+                    - mcp_recall_max_tokens: Ceiling on the recall tool's max_tokens (0 = none).
+                    - mcp_recall_compact: Recall tool returns only id, text, type and date per result.
                     - mcp_enabled_tools: Tool allowlist for this bank.
                     Any configurable field name is accepted (use Python field names).
             """

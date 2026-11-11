@@ -157,12 +157,14 @@ async def test_hierarchical_fields_categorization():
     assert "recall_decision_model_prune" in configurable
     assert "recall_decision_model_dedup" in configurable
     assert "recall_min_score" in configurable
+    assert "mcp_recall_max_tokens" in configurable
+    assert "mcp_recall_compact" in configurable
     assert "mental_model_min_refresh_interval_seconds" in configurable
     assert "page_default_trigger" in configurable
     assert "reflect_default_options" in configurable
 
     # Verify count is correct
-    assert len(configurable) == 61
+    assert len(configurable) == 63
 
     # Verify credential fields (NEVER exposed)
     assert "llm_api_key" in credentials

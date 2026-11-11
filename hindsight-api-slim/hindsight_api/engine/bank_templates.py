@@ -281,6 +281,12 @@ class BankTemplateConfig(BaseModel):
         description="Default for recall min_scores.final when the request omits it (cross-encoder reranker only); "
         "0 disables the floor",
     )
+    mcp_recall_max_tokens: int | None = Field(
+        default=None, description="Ceiling on the MCP recall tool's max_tokens; 0 means no ceiling"
+    )
+    mcp_recall_compact: bool | None = Field(
+        default=None, description="MCP recall tool returns only id, text, fact_type and a date per result"
+    )
     recall_chunks_max_tokens: int | None = Field(
         default=None, description="Max tokens of raw chunks returned by recall (when recall_include_chunks is set)"
     )

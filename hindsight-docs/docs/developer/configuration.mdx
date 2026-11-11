@@ -1936,6 +1936,15 @@ A recall request can drop low-scoring results with [`min_scores`](./api/recall#m
 
 The floor is an absolute cutoff on a score that is only reliable for ordering, so calibrate it against the `scores.final` values your reranker actually returns, and recalibrate after changing reranker models.
 
+#### MCP recall size
+
+The score floor decides which memories are relevant; these two decide how much of them an MCP client receives. The calling model chooses the recall tool's `max_tokens` (the tool's default is 4096), and every result comes back with its scores, tags and document ids, which make up about three quarters of the response. On a topic the bank covers well, that is over ten thousand tokens in the conversation for one recall. Both are hierarchical — overridable per bank via the [config API](#hierarchical-configuration) as `mcp_recall_max_tokens` and `mcp_recall_compact` — and apply to the MCP `recall` tool only, not to the HTTP API.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HINDSIGHT_API_MCP_RECALL_MAX_TOKENS` | Ceiling on the recall tool's `max_tokens`: a larger value passed by the client is lowered to it. It bounds the results' text; with full results the response is still several times that. `0` means no ceiling. | `0` |
+| `HINDSIGHT_API_MCP_RECALL_COMPACT` | Return only `id`, `text`, `fact_type` and one day-precision `date` per result. The rest of a result stays available through `get_memory`. Chunks, entities and source facts are still returned when the client asks for them. | `false` |
+
 #### Recall pipeline stages
 
 Recall runs four retrieval arms (semantic, BM25, graph, temporal) and then reranks the
@@ -2744,6 +2753,7 @@ Configuration for background task processing. By default, the API processes task
 | `HINDSIGHT_API_WORKER_ENABLED` | Enable the internal worker in the API process. Set to `false` to stop this process claiming and running queued background operations (consolidation, retain, mental model refresh) — this, not the maintenance interval knobs, is what quiesces execution. | `true` |
 | `HINDSIGHT_API_INLINE_TASKS` | Run background tasks **synchronously** inside the request instead of via a poller. No worker poller and no maintenance loop, so the database is touched only while a request is in flight. Retain blocks until extraction finishes. See note below. | `false` |
 | `HINDSIGHT_API_WORKER_ON_DEMAND` | Keep the **async** embedded worker but wake it via an in-process signal on each task submission instead of continuous polling. Retain returns immediately; between requests the database receives zero queries so it can auto-suspend. Single-process only. **Preferred over `INLINE_TASKS`** for always-on containers. See note below. | `false` |
+| `HINDSIGHT_API_WORKER_ON_DEMAND_RECOVERY_DELAY_SECONDS` | On-demand mode only. How long after startup the worker waits before taking over tasks a previous process left `processing` under the same worker id. It must outlast a container that is being replaced: on a platform that starts the new container before stopping the old one (Railway, a rolling deploy), taking the old one's tasks while it still runs lets it claim them again and be killed holding them. Set it above the platform's overlap plus its drain time. A longer wait only delays recovery after a crash. | `60` |
 | `HINDSIGHT_API_WORKER_ID` | Unique worker identifier | hostname |
 | `HINDSIGHT_API_WORKER_POLL_INTERVAL_MS` | Database polling interval in milliseconds | `500` |
 | `HINDSIGHT_API_WORKER_MAX_RETRIES` | Max retries before marking task failed | `3` |
@@ -2774,7 +2784,7 @@ The internal worker polls the database continuously (every `WORKER_POLL_INTERVAL
 
 Two modes make a single-container deployment touch the database **only while there is work**, so an idle database can auto-suspend. Pick one — do not set both, and do not combine either with dedicated `hindsight-worker` processes.
 
-- **`HINDSIGHT_API_WORKER_ON_DEMAND=true` (recommended for always-on containers).** Keeps the async worker embedded in the API, but because they share a process, a task submission wakes the worker with an **in-process signal** instead of the worker polling to discover it. `retain` returns immediately and extraction runs in the background. While tasks are running the worker polls as usual; once nothing is running and nothing is claimable it blocks on that signal and issues **zero** queries. Deferred/retried tasks re-arm the wake on a timer, and leftover work is drained on startup (surviving restarts/deploys).
+- **`HINDSIGHT_API_WORKER_ON_DEMAND=true` (recommended for always-on containers).** Keeps the async worker embedded in the API, but because they share a process, a task submission wakes the worker with an **in-process signal** instead of the worker polling to discover it. `retain` returns immediately and extraction runs in the background. While tasks are running the worker polls as usual; once nothing is running and nothing is claimable it blocks on that signal and issues **zero** queries. Deferred/retried tasks re-arm the wake on a timer, and leftover work is drained after startup (surviving restarts/deploys). That drain waits `HINDSIGHT_API_WORKER_ON_DEMAND_RECOVERY_DELAY_SECONDS` first, so that on a platform that starts the new container before stopping the old one, the old one has exited before its unfinished tasks are taken over. Set `HINDSIGHT_API_WORKER_ID` to a fixed value on such platforms: the default is the hostname, which changes with every container, and a task left by the old id is never picked up.
 - **`HINDSIGHT_API_INLINE_TASKS=true` (for app-level serverless).** Runs each task **synchronously** inside the request, with no poller at all. Choose this only where a background task could not outlive the response (e.g. the process is frozen/killed right after replying). Trade-off: `retain`/upload blocks until extraction (and any triggered consolidation) finishes.
 
 Neither mode runs the [background maintenance](#background-maintenance) loop on its timer, because every job in it would wake the database.
