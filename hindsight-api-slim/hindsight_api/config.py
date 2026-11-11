@@ -1058,6 +1058,15 @@ ENV_MODEL_INIT_TIMEOUT = "HINDSIGHT_API_MODEL_INIT_TIMEOUT"
 
 # Worker configuration (distributed task processing)
 ENV_WORKER_ENABLED = "HINDSIGHT_API_WORKER_ENABLED"
+# Inline task execution: run background tasks synchronously inside the request
+# instead of via a background worker/poller. Single-process, zero idle DB polling
+# (lets scale-to-zero databases like Neon auto-suspend when idle).
+ENV_INLINE_TASKS = "HINDSIGHT_API_INLINE_TASKS"
+# On-demand worker: keep the async background worker embedded in the API but wake
+# it via an in-process signal on each task submission instead of continuous DB
+# polling. Async (retain returns immediately) AND zero idle polling. Single
+# process only — a separate hindsight-worker still polls.
+ENV_WORKER_ON_DEMAND = "HINDSIGHT_API_WORKER_ON_DEMAND"
 ENV_WORKER_ID = "HINDSIGHT_API_WORKER_ID"
 ENV_WORKER_POLL_INTERVAL_MS = "HINDSIGHT_API_WORKER_POLL_INTERVAL_MS"
 ENV_WORKER_MAX_RETRIES = "HINDSIGHT_API_WORKER_MAX_RETRIES"
@@ -1173,6 +1182,8 @@ ENV_RECALL_BUDGET_ADAPTIVE_MID = "HINDSIGHT_API_RECALL_BUDGET_ADAPTIVE_MID"
 ENV_RECALL_BUDGET_ADAPTIVE_HIGH = "HINDSIGHT_API_RECALL_BUDGET_ADAPTIVE_HIGH"
 ENV_RECALL_BUDGET_MIN = "HINDSIGHT_API_RECALL_BUDGET_MIN"
 ENV_RECALL_BUDGET_MAX = "HINDSIGHT_API_RECALL_BUDGET_MAX"
+# FORK: minimum post-rerank relevance score a fact must meet to be returned.
+ENV_RECALL_MIN_SCORE = "HINDSIGHT_API_RECALL_MIN_SCORE"
 
 # Recall candidate gating (per-source cap + BM25 score floor)
 ENV_BM25_MIN_SCORE = "HINDSIGHT_API_BM25_MIN_SCORE"
@@ -2120,6 +2131,14 @@ DEFAULT_MODEL_INIT_TIMEOUT = 300  # seconds (cap on startup model/connection ini
 
 # Worker configuration (distributed task processing)
 DEFAULT_WORKER_ENABLED = True  # API runs worker by default (standalone mode)
+# When True, the API executes background tasks synchronously within the request
+# (no poller, no maintenance loop). Off by default; opt-in for single-process
+# deployments that want the database touched only during requests.
+DEFAULT_INLINE_TASKS = False
+# When True, the embedded worker runs but wakes on in-process task submission
+# instead of polling, giving async execution with no idle DB queries. Off by
+# default. Preferred over inline for always-on single-container deployments.
+DEFAULT_WORKER_ON_DEMAND = False
 DEFAULT_WORKER_ID = None  # Will use hostname if not specified
 DEFAULT_WORKER_POLL_INTERVAL_MS = 500  # Poll database every 500ms
 DEFAULT_WORKER_MAX_RETRIES = 3  # Max retries before marking task failed
@@ -2216,6 +2235,14 @@ DEFAULT_RECALL_BUDGET_ADAPTIVE_MID = 0.075
 DEFAULT_RECALL_BUDGET_ADAPTIVE_HIGH = 0.25
 DEFAULT_RECALL_BUDGET_MIN = 20  # Floor for the adaptive function
 DEFAULT_RECALL_BUDGET_MAX = 2000  # Ceiling for the adaptive function
+
+# FORK: Minimum post-rerank relevance score (typically 0.0-1.0) a fact must meet
+# to be included in recall results. 0.0 = disabled (upstream behavior: always
+# return the top matches up to the token budget). Higher = stricter; when nothing
+# clears the bar, recall returns ZERO results instead of forcing irrelevant ones.
+# Only applied to cross-encoder reranking (scores from passthrough rerankers are
+# not calibrated relevance values). Tune live via the bank's recall_min_score.
+DEFAULT_RECALL_MIN_SCORE = 0.0
 
 # Disposition defaults (None = not set, fall back to bank DB value or 3)
 DEFAULT_DISPOSITION_SKEPTICISM = None
@@ -3944,6 +3971,8 @@ class HindsightConfig:
     recall_budget_adaptive_high: float
     recall_budget_min: int
     recall_budget_max: int
+    # FORK: minimum relevance score [~0.0-1.0]; results scoring below are dropped (0.0 = disabled)
+    recall_min_score: float
 
     # Disposition settings (hierarchical - can be overridden per bank; None = fall back to DB)
     disposition_skepticism: int | None
@@ -3974,6 +4003,13 @@ class HindsightConfig:
 
     # Worker configuration (distributed task processing)
     worker_enabled: bool
+    # Run background tasks inline within the request instead of via a poller.
+    # Implies no worker poller and no background maintenance loop.
+    inline_tasks: bool
+    # Keep the embedded worker but wake it on task submission instead of polling.
+    # Async execution with no idle DB polling; maintenance runs when the worker goes
+    # idle after work instead of on a timer.
+    worker_on_demand: bool
     worker_id: str | None
     worker_poll_interval_ms: int
     worker_max_retries: int
@@ -4346,6 +4382,7 @@ class HindsightConfig:
         "recall_budget_adaptive_high",
         "recall_budget_min",
         "recall_budget_max",
+        "recall_min_score",  # FORK: relevance threshold (live-tunable per bank)
         # Disposition settings
         "disposition_skepticism",
         "disposition_literalism",
@@ -5785,6 +5822,8 @@ class HindsightConfig:
             model_init_timeout=float(os.getenv(ENV_MODEL_INIT_TIMEOUT, str(DEFAULT_MODEL_INIT_TIMEOUT))),
             # Worker configuration
             worker_enabled=os.getenv(ENV_WORKER_ENABLED, str(DEFAULT_WORKER_ENABLED)).lower() == "true",
+            inline_tasks=os.getenv(ENV_INLINE_TASKS, str(DEFAULT_INLINE_TASKS)).lower() == "true",
+            worker_on_demand=os.getenv(ENV_WORKER_ON_DEMAND, str(DEFAULT_WORKER_ON_DEMAND)).lower() == "true",
             worker_id=os.getenv(ENV_WORKER_ID) or DEFAULT_WORKER_ID,
             worker_poll_interval_ms=int(os.getenv(ENV_WORKER_POLL_INTERVAL_MS, str(DEFAULT_WORKER_POLL_INTERVAL_MS))),
             worker_max_retries=int(os.getenv(ENV_WORKER_MAX_RETRIES, str(DEFAULT_WORKER_MAX_RETRIES))),
@@ -5895,6 +5934,7 @@ class HindsightConfig:
             ),
             recall_budget_min=int(os.getenv(ENV_RECALL_BUDGET_MIN, str(DEFAULT_RECALL_BUDGET_MIN))),
             recall_budget_max=int(os.getenv(ENV_RECALL_BUDGET_MAX, str(DEFAULT_RECALL_BUDGET_MAX))),
+            recall_min_score=float(os.getenv(ENV_RECALL_MIN_SCORE, str(DEFAULT_RECALL_MIN_SCORE))),  # FORK
             # Disposition settings (None = fall back to DB value)
             disposition_skepticism=_env_int_or(ENV_DISPOSITION_SKEPTICISM, DEFAULT_DISPOSITION_SKEPTICISM),
             disposition_literalism=_env_int_or(ENV_DISPOSITION_LITERALISM, DEFAULT_DISPOSITION_LITERALISM),

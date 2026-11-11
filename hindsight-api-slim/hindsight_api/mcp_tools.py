@@ -4557,6 +4557,7 @@ def _register_update_bank(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsCo
                     - recall_include_chunks: Include raw chunks in recall results.
                     - recall_prefer_observations: Default prefer_observations for recall requests that omit it.
                     - recall_max_tokens: Max tokens for recall results.
+                    - recall_min_score: Default min_scores.final for recall requests that omit it (0 disables).
                     - mcp_enabled_tools: Tool allowlist for this bank.
                     Any configurable field name is accepted (use Python field names).
                 bank_id: Optional bank (defaults to session bank). Use for cross-bank operations.
@@ -4606,6 +4607,7 @@ def _register_update_bank(mcp: FastMCP, memory: MemoryEngine, config: MCPToolsCo
                     - recall_include_chunks: Include raw chunks in recall results.
                     - recall_prefer_observations: Default prefer_observations for recall requests that omit it.
                     - recall_max_tokens: Max tokens for recall results.
+                    - recall_min_score: Default min_scores.final for recall requests that omit it (0 disables).
                     - mcp_enabled_tools: Tool allowlist for this bank.
                     Any configurable field name is accepted (use Python field names).
             """

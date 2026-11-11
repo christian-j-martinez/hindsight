@@ -1903,6 +1903,16 @@ Two functions are available:
 | `HINDSIGHT_API_RECALL_BUDGET_MIN` | Floor for the adaptive function (after clamping). | `20` |
 | `HINDSIGHT_API_RECALL_BUDGET_MAX` | Ceiling for the adaptive function (after clamping). | `2000` |
 
+#### Recall relevance floor
+
+A recall request can drop low-scoring results with [`min_scores`](./api/recall.md#min_scores), but a caller that cannot set it — an MCP client, for example — always gets the top matches up to its token budget, relevant or not. This knob gives a bank a default floor instead. It is hierarchical — overridable per bank via the [config API](#hierarchical-configuration) as `recall_min_score`.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HINDSIGHT_API_RECALL_MIN_SCORE` | Default for `min_scores.final` on recalls that set none: results whose final score is below it are dropped, so a recall where nothing clears it returns no results. A request's own `min_scores.final` wins, including `0` to turn the floor off for that call. Applied only when a pointwise cross-encoder ranked the recall — not under RRF/interleave fusion, and not when a [decision model](./decision-models.md) or TypeSafe ranks it, since those publish rank positions rather than relevance (use the decision model's `prune` there). `0` disables it. | `0.0` |
+
+The floor is an absolute cutoff on a score that is only reliable for ordering, so calibrate it against the `scores.final` values your reranker actually returns, and recalibrate after changing reranker models.
+
 #### Recall pipeline stages
 
 Recall runs four retrieval arms (semantic, BM25, graph, temporal) and then reranks the
@@ -2727,6 +2737,8 @@ Configuration for background task processing. By default, the API processes task
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `HINDSIGHT_API_WORKER_ENABLED` | Enable the internal worker in the API process. Set to `false` to stop this process claiming and running queued background operations (consolidation, retain, mental model refresh) — this, not the maintenance interval knobs, is what quiesces execution. | `true` |
+| `HINDSIGHT_API_INLINE_TASKS` | Run background tasks **synchronously** inside the request instead of via a poller. No worker poller and no maintenance loop, so the database is touched only while a request is in flight. Retain blocks until extraction finishes. See note below. | `false` |
+| `HINDSIGHT_API_WORKER_ON_DEMAND` | Keep the **async** embedded worker but wake it via an in-process signal on each task submission instead of continuous polling. Retain returns immediately; between requests the database receives zero queries so it can auto-suspend. Single-process only. **Preferred over `INLINE_TASKS`** for always-on containers. See note below. | `false` |
 | `HINDSIGHT_API_WORKER_ID` | Unique worker identifier | hostname |
 | `HINDSIGHT_API_WORKER_POLL_INTERVAL_MS` | Database polling interval in milliseconds | `500` |
 | `HINDSIGHT_API_WORKER_MAX_RETRIES` | Max retries before marking task failed | `3` |
@@ -2750,6 +2762,23 @@ Configuration for background task processing. By default, the API processes task
 | `HINDSIGHT_API_WORKER_<TYPE>_MAX_SLOTS` | **Deprecated** alias for `..._RESERVED_SLOTS`, where `<TYPE>` is one of `CONSOLIDATION`, `RETAIN`, `FILE_CONVERT_RETAIN`, `REFRESH_MENTAL_MODEL`, `GRAPH_MAINTENANCE`, `IMPORT_DOCUMENTS`. The name is misleading — it always set the reservation floor, never a ceiling. Still honored but logs a warning; will be removed in a future release. Setting both it and `..._RESERVED_SLOTS` is an error. | _(unset)_ |
 
 Terminal operations use one coherent retention window for the entire row. Hindsight does not scrub the task payload when an operation finishes: failed and cancelled operations need it for retry, while `include_payload=true` on completed operations is an explicit debugging surface. Keeping payload, result metadata, progress, and status together also avoids partial operation histories. Once a terminal row's `updated_at` is older than the configured window, the background maintenance loop prunes it in bounded per-schema batches, alongside the other scheduled sweeps. PostgreSQL only — the maintenance loop does not run on Oracle. Pending and processing rows are never pruned by this cleanup.
+
+> **📝 Single-process modes for scale-to-zero databases (no idle polling)**
+>
+
+The internal worker polls the database continuously (every `WORKER_POLL_INTERVAL_MS`) looking for pending tasks. On a **scale-to-zero / usage-billed database** (e.g. Neon, Aurora Serverless) that constant polling keeps the compute awake 24/7 even when the deployment is idle, which can dominate the bill.
+
+Two modes make a single-container deployment touch the database **only while there is work**, so an idle database can auto-suspend. Pick one — do not set both, and do not combine either with dedicated `hindsight-worker` processes.
+
+- **`HINDSIGHT_API_WORKER_ON_DEMAND=true` (recommended for always-on containers).** Keeps the async worker embedded in the API, but because they share a process, a task submission wakes the worker with an **in-process signal** instead of the worker polling to discover it. `retain` returns immediately and extraction runs in the background. While tasks are running the worker polls as usual; once nothing is running and nothing is claimable it blocks on that signal and issues **zero** queries. Deferred/retried tasks re-arm the wake on a timer, and leftover work is drained on startup (surviving restarts/deploys).
+- **`HINDSIGHT_API_INLINE_TASKS=true` (for app-level serverless).** Runs each task **synchronously** inside the request, with no poller at all. Choose this only where a background task could not outlive the response (e.g. the process is frozen/killed right after replying). Trade-off: `retain`/upload blocks until extraction (and any triggered consolidation) finishes.
+
+Neither mode runs the [background maintenance](#background-maintenance) loop on its timer, because every job in it would wake the database.
+
+- **On-demand mode runs the same jobs when the worker goes idle** — right after it finishes its queued tasks, while the database is awake anyway. They run in the background and never delay a request. Each job still honours its own interval (`HINDSIGHT_API_RETENTION_SWEEP_INTERVAL_SECONDS` and the others), so an interval is the *minimum* gap between runs here, not the cadence: a deployment nobody writes to for a week runs no maintenance that week. That includes **scheduled mental model refreshes** (`refresh_cron`), which fire after the next piece of work once they are due, not at the scheduled minute.
+- **Inline mode runs none of them.** Nothing prunes `audit_log` or `llm_requests`, cleans up operations, sweeps attachments, reconciles consolidation or runs scheduled refreshes; refreshes triggered by consolidation or requested explicitly still run.
+
+Recall is unaffected by either mode. When on-demand or inline mode is active, `WORKER_ENABLED` is effectively ignored for the embedded worker's polling behavior.
 
 > **📝 Worker slot reservations are a floor, not a cap**
 >

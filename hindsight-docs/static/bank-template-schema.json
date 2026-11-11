@@ -811,6 +811,19 @@
           "description": "Max tokens of results returned by recall",
           "title": "Recall Max Tokens"
         },
+        "recall_min_score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Default for recall min_scores.final when the request omits it (cross-encoder reranker only); 0 disables the floor",
+          "title": "Recall Min Score"
+        },
         "recall_chunks_max_tokens": {
           "anyOf": [
             {

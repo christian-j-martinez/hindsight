@@ -179,6 +179,28 @@ class MaintenanceLoop:
         except RuntimeError:
             logger.debug("Cannot start maintenance loop: no running event loop")
 
+    def run_once_soon(self) -> None:
+        """Run one tick in the background, unless a tick or the periodic loop is already running.
+
+        For a deployment that does not run the periodic loop because its timer would keep
+        a scale-to-zero database awake (the on-demand worker). The caller invokes this
+        when the database is already awake, so maintenance costs no extra wake-up. Each
+        job still honours its own interval, so this is cheap to call often: a tick with
+        nothing due issues no queries.
+        """
+        if self._task and not self._task.done():
+            return
+        if _is_oracle() or not self._any_job_enabled():
+            return
+        self._stop.clear()
+        self._task = asyncio.create_task(self._run_once())
+
+    async def _run_once(self) -> None:
+        try:
+            await self._tick()
+        except Exception:
+            logger.exception("Maintenance tick failed")
+
     async def stop(self) -> None:
         """Stop the loop: let the current job reach its next stopping point, then cancel it.
 

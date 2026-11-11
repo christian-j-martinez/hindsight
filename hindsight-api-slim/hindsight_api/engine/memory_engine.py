@@ -1992,6 +1992,8 @@ class SearchRequest:
     created_after: datetime | None = None
     created_before: datetime | None = None
     min_scores: MinScores | None = None
+    # FORK: the bank's recall_min_score, used as min_scores.final when the request sets none.
+    default_min_final: float = 0.0
     temporal_window: TemporalWindow | None = None
     include_source_facts: bool = False
     max_source_facts_tokens: int = 4096
@@ -3497,11 +3499,22 @@ class MemoryEngine(MemoryEngineInterface):
         self._reflect_decision_model_unsupported_logged = False
 
         # Initialize task backend.
-        # All backends use BrokerTaskBackend + WorkerPoller for async background execution.
+        # Normally all backends use BrokerTaskBackend + WorkerPoller for async
+        # background execution. In inline mode there is no poller, so tasks run
+        # synchronously inside the request via SyncTaskBackend instead.
         # Create the backend object early so we can query its capabilities.
         self._backend = create_database_backend(self._database_backend_type)
         if task_backend:
             self._task_backend = task_backend
+        elif config.inline_tasks:
+            # Inline mode: execute tasks synchronously within the request. No
+            # poller and no broker rows left waiting on a worker, so the database
+            # is touched only while a request is in flight — letting scale-to-zero
+            # databases (e.g. Neon) auto-suspend when idle.
+            from .task_backend import SyncTaskBackend
+
+            self._task_backend = SyncTaskBackend()
+            logger.info("Inline task mode enabled: tasks run synchronously, no worker poller")
         else:
             self._task_backend = self._backend.create_task_backend(
                 pool_getter=lambda: self._backend,
@@ -5398,6 +5411,15 @@ class MemoryEngine(MemoryEngineInterface):
                         )
                     raise
 
+    def run_maintenance_soon(self) -> None:
+        """Run whichever maintenance jobs are due, in the background.
+
+        The on-demand worker calls this each time it goes idle, in place of the periodic
+        loop it does not run. Returns immediately; the jobs never hold up the caller.
+        """
+        if self._maintenance_loop is not None:
+            self._maintenance_loop.run_once_soon()
+
     async def on_task_wall_timeout(
         self, task_dict: dict[str, Any], schema: str | None, error_message: str, stage: str
     ) -> None:
@@ -6734,10 +6756,19 @@ class MemoryEngine(MemoryEngineInterface):
         # Start the background maintenance loop: cross-tenant retention sweeps
         # (audit_log, llm_requests) plus the consolidation reconcile that
         # re-schedules banks with eligible-but-unscheduled facts.
+        #
+        # The timer is not started in inline and on-demand modes: every job in the loop
+        # is a periodic database toucher, which would defeat the point of both modes
+        # (keeping a scale-to-zero database idle). On-demand mode runs the same jobs
+        # when its worker goes idle instead (run_maintenance_soon), while the database
+        # is awake anyway. It used to skip them outright, which left llm_requests
+        # unpruned and nothing to reschedule a stranded consolidation. Inline mode
+        # still runs none: a job started there could not outlive the response.
         from .maintenance import MaintenanceLoop
 
         self._maintenance_loop = MaintenanceLoop(self)
-        self._maintenance_loop.start()
+        if not (config.inline_tasks or config.worker_on_demand):
+            self._maintenance_loop.start()
 
         self._initialized = True
         logger.info("Memory system initialized (pool and task backend started)")
@@ -9797,6 +9828,7 @@ class MemoryEngine(MemoryEngineInterface):
             prune = bool(budget_config_dict.get("recall_decision_model_prune", False))
         if dedup is None:
             dedup = bool(budget_config_dict.get("recall_decision_model_dedup", False))
+        default_min_final = float(budget_config_dict.get("recall_min_score") or 0.0)
 
         # One id for every log line of this recall, including a reranker failover
         # warning, so concurrent recalls can be told apart (#6072). The uuid suffix
@@ -9866,6 +9898,7 @@ class MemoryEngine(MemoryEngineInterface):
                                 created_after=created_after,
                                 created_before=created_before,
                                 min_scores=min_scores,
+                                default_min_final=default_min_final,
                                 temporal_window=temporal_window,
                                 connection_budget=_connection_budget,
                                 quiet=_quiet,
@@ -10839,6 +10872,24 @@ class MemoryEngine(MemoryEngineInterface):
             # (a clearly-relevant match can score ~0.001 while its *ranking* is right).
             min_reranker = request.min_scores.reranker if request.min_scores else None
             min_final = request.min_scores.final if request.min_scores else None
+            if min_final is None and request.default_min_final > 0.0:
+                # FORK: the bank's recall_min_score stands in for an unset min_scores.final, so
+                # callers that cannot pass a floor (MCP) still get zero results when nothing is
+                # relevant. Only a pointwise cross-encoder's weights are relevance values: fusion
+                # passthrough and rank-position providers (a decision model) are left unfiltered.
+                from .search.recall_boost import stage2_passthrough
+
+                if (
+                    request.reranking == "cross_encoder"
+                    and served_provider not in RANK_SCORE_PROVIDERS
+                    and not stage2_passthrough(request.reranking, served_provider)
+                ):
+                    min_final = request.default_min_final
+                else:
+                    log_buffer.append(
+                        f"  [4.9] bank recall_min_score skipped: {request.reranking}/{served_provider} "
+                        "weights are not relevance scores"
+                    )
             if min_reranker is not None and served_provider in RANK_SCORE_PROVIDERS:
                 # Recall entry rejects this floor when the primary scores by rank; getting
                 # here means the chain failed over to such a member. Its scores are rank
@@ -22638,6 +22689,7 @@ class MemoryEngine(MemoryEngineInterface):
 
         op_uuid = uuid.UUID(operation_id)
 
+        requeued_payloads: list[Any] = []
         async with acquire_with_retry(backend) as conn:
             # Make the retry transition a single conditional write. This
             # coordinates with retention cleanup's row locks: either retry wins
@@ -22663,13 +22715,15 @@ class MemoryEngine(MemoryEngineInterface):
                       OR (status = 'pending' AND next_retry_at > NOW())
                   )
                   AND NOT (operation_type = 'batch_retain' AND task_payload IS NULL)
-                RETURNING operation_id
+                RETURNING operation_id, task_payload
                 """,
                 op_uuid,
                 bank_id,
             )
 
-            if updated is None:
+            if updated is not None:
+                requeued_payloads.append(updated["task_payload"])
+            else:
                 row = await conn.fetchrow(
                     f"SELECT status, operation_type, task_payload FROM {fq_table('async_operations')} "
                     f"WHERE operation_id = $1 AND bank_id = $2",
@@ -22691,6 +22745,21 @@ class MemoryEngine(MemoryEngineInterface):
                 # #2985 bug). If nothing is retryable, fall through to the 409 below.
                 if row["operation_type"] == "batch_retain" and row["task_payload"] is None:
                     child_filter = json.dumps({"parent_operation_id": operation_id})
+                    # Read before the reset rather than UPDATE ... RETURNING: Oracle's
+                    # RETURNING INTO hands back one row, and a batch has many children.
+                    requeued_children = await conn.fetch(
+                        f"""
+                        SELECT task_payload FROM {fq_table("async_operations")}
+                        WHERE bank_id = $1
+                          AND result_metadata::jsonb @> $2::jsonb
+                          AND (
+                              status IN ('failed', 'cancelled')
+                              OR (status = 'pending' AND next_retry_at > NOW())
+                          )
+                        """,
+                        bank_id,
+                        child_filter,
+                    )
                     await conn.execute(
                         f"""
                         UPDATE {fq_table("async_operations")}
@@ -22737,29 +22806,37 @@ class MemoryEngine(MemoryEngineInterface):
                         bank_id,
                         child_filter,
                     )
-                    if revived is not None:
-                        return {
-                            "success": True,
-                            "message": f"Operation {operation_id} queued for retry",
-                            "operation_id": operation_id,
-                        }
+                    if revived is None:
+                        raise OperationValidationError(
+                            f"Operation {operation_id} is a batch_retain parent with no incomplete sub-batches "
+                            f"to retry (its children have all completed, or it has none). Resubmit the source "
+                            f"documents to re-ingest them, then delete this record via "
+                            f"DELETE /operations/{operation_id}/delete.",
+                            409,
+                        )
+                    requeued_payloads.extend(child["task_payload"] for child in requeued_children)
+                else:
                     raise OperationValidationError(
-                        f"Operation {operation_id} is a batch_retain parent with no incomplete sub-batches "
-                        f"to retry (its children have all completed, or it has none). Resubmit the source "
-                        f"documents to re-ingest them, then delete this record via "
-                        f"DELETE /operations/{operation_id}/delete.",
+                        f"Operation {operation_id} cannot be retried: status is '{row['status']}', expected 'failed', 'cancelled' or deferred",
                         409,
                     )
-                raise OperationValidationError(
-                    f"Operation {operation_id} cannot be retried: status is '{row['status']}', expected 'failed', 'cancelled' or deferred",
-                    409,
-                )
 
-            return {
-                "success": True,
-                "message": f"Operation {operation_id} queued for retry",
-                "operation_id": operation_id,
-            }
+        # Re-submit through the task backend now that the rows are back to 'pending'
+        # and the connection is released. A polling worker would discover them on its
+        # next cycle anyway, but the on-demand embedded worker only wakes on submission,
+        # and in inline mode there is no worker at all, so submit_task is what executes
+        # the retry. For BrokerTaskBackend this is a pure wake nudge: its UPDATE skips
+        # rows whose task_payload is already set.
+        for task_payload in requeued_payloads:
+            if task_payload is not None:
+                payload_dict = json.loads(task_payload) if isinstance(task_payload, str) else task_payload
+                await self._task_backend.submit_task(payload_dict)
+
+        return {
+            "success": True,
+            "message": f"Operation {operation_id} queued for retry",
+            "operation_id": operation_id,
+        }
 
     async def delete_operation(
         self,
@@ -24623,6 +24700,8 @@ class MemoryEngine(MemoryEngineInterface):
                 op_uuid,
                 bank_id,
             )
+        # The submit that led here was folded, so nothing told an on-demand worker.
+        self._task_backend.wake()
         logger.info(
             f"Released the min-interval park on queued refresh {operation_id} "
             f"(bank_id={bank_id}) for an explicit refresh"

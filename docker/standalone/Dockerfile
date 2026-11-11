@@ -459,3 +459,11 @@ FROM cp-only AS default-cp
 # The last stage is what a build without --target produces.
 # Use --target to pick another: docker build --target api-only .
 FROM standalone
+
+# Default retain policy for this deployment: scope memory to user-sourced facts and keep
+# out the assistant's own contributions (e.g. product recommendations). This steers
+# extraction without replacing the rules and applies to every retain() unless a bank sets
+# its own retain_mission. Set here (deployment/runtime layer) rather than as the config.py
+# DEFAULT_RETAIN_MISSION so the base-extraction test suite keeps testing unmissioned
+# behavior. Override at runtime by setting HINDSIGHT_API_RETAIN_MISSION.
+ENV HINDSIGHT_API_RETAIN_MISSION="Store only what the user shares about themselves and their world: durable facts and stable preferences, circumstances, key decisions and why they were made, project and technical context, goals, plans, opinions, and relationships between people and tools. Do not retain what the assistant (e.g. Claude) contributes — recommendations, product suggestions, options, advice, or information it volunteers — even when the user asked for it. Exception: when the user explicitly adopts a suggestion, record it as the user's own decision (e.g. 'User chose X'), not as the assistant's recommendation. Ignore greetings, transient operational chatter, and ephemeral details that won't matter later."
